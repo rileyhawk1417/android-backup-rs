@@ -1,0 +1,304 @@
+//! Application configuration: a small TOML file, deliberately **separate** from
+//! the SQLite manifest (plan §4.1: "ADB should be managed separately from the
+//! backup database and user data").
+//!
+//! `load` never writes: a corrupt or missing file falls back to defaults with a
+//! warning, and only an explicit [`AppConfig::save`] persists anything. This is
+//! what stops the application from silently overwriting a user's manual ADB path.
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::clock;
+use crate::paths::PathError;
+
+/// How the application obtains the `adb` executable (plan §4.1).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum AdbMode {
+    /// Downloaded and managed by the application (default).
+    #[default]
+    Managed,
+    /// Use whatever `adb` is on `PATH`.
+    System,
+    /// Use an explicit executable chosen by the user.
+    Manual { path: PathBuf },
+}
+
+pub const CONFIG_VERSION: u32 = 1;
+pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 4;
+const CONFIG_FILE_NAME: &str = "config.toml";
+const APP_DIR_NAME: &str = "android-backup";
+
+/// Everything the application needs to know, persisted as TOML.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppConfig {
+    #[serde(default = "default_config_version")]
+    pub config_version: u32,
+    #[serde(default)]
+    pub adb_mode: AdbMode,
+    /// Global default backup location; `None` means "not chosen yet".
+    #[serde(default)]
+    pub global_backup_dir: Option<PathBuf>,
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_secs: u64,
+    /// Directory where managed platform-tools are extracted.
+    #[serde(default)]
+    pub managed_adb_dir: Option<PathBuf>,
+}
+
+fn default_config_version() -> u32 {
+    CONFIG_VERSION
+}
+
+fn default_poll_interval() -> u64 {
+    DEFAULT_POLL_INTERVAL_SECS
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            config_version: CONFIG_VERSION,
+            adb_mode: AdbMode::default(),
+            global_backup_dir: None,
+            poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
+            managed_adb_dir: None,
+        }
+    }
+}
+
+/// Errors from configuration I/O.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ConfigError {
+    #[error("could not determine the home directory for default paths")]
+    NoHomeDir,
+    #[error("i/o error accessing {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("could not parse configuration file {path}: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: Box<toml::de::Error>,
+    },
+    #[error("could not serialize configuration: {0}")]
+    Serialize(#[from] toml::ser::Error),
+    #[error(transparent)]
+    Path(#[from] PathError),
+}
+
+/// Resolved filesystem locations used by the application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppPaths {
+    pub config_file: PathBuf,
+    pub data_dir: PathBuf,
+    pub log_dir: PathBuf,
+    pub managed_adb_dir: PathBuf,
+}
+
+impl AppPaths {
+    /// Discover platform-appropriate locations.
+    ///
+    /// * Linux: `~/.config/android-backup`, `~/.local/share/android-backup`
+    /// * Windows: `%APPDATA%\android-backup`
+    pub fn discover() -> Result<Self, ConfigError> {
+        let config_dir = dirs::config_dir().ok_or(ConfigError::NoHomeDir)?;
+        let data_dir = dirs::data_dir().unwrap_or_else(|| config_dir.clone());
+        Ok(Self::with_root(&config_dir, &data_dir))
+    }
+
+    /// Build from explicit roots; used by tests and by callers that manage their
+    /// own layout.
+    pub fn with_root(config_root: &Path, data_root: &Path) -> Self {
+        let config_dir = config_root.join(APP_DIR_NAME);
+        let data_dir = data_root.join(APP_DIR_NAME);
+        Self {
+            config_file: config_dir.join(CONFIG_FILE_NAME),
+            log_dir: data_dir.join("logs"),
+            managed_adb_dir: data_dir.join("platform-tools"),
+            data_dir,
+        }
+    }
+}
+
+/// Platform default backup location: `%USERPROFILE%/AndroidBackups` on Windows,
+/// `~/AndroidBackups` elsewhere (plan §6.1).
+pub fn default_backup_dir() -> Result<PathBuf, ConfigError> {
+    dirs::home_dir()
+        .map(|home| home.join("AndroidBackups"))
+        .ok_or(ConfigError::NoHomeDir)
+}
+
+impl AppConfig {
+    /// Load configuration from a file, falling back to defaults when the file is
+    /// missing or unreadable. Never writes.
+    pub fn load(path: &Path) -> Self {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!(path = %path.display(), "no configuration file yet, using defaults");
+                return Self::default();
+            }
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "cannot read configuration, using defaults");
+                return Self::default();
+            }
+        };
+        match toml::from_str::<AppConfig>(&raw) {
+            Ok(mut cfg) => {
+                cfg.normalize();
+                cfg
+            }
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "configuration file is corrupt, using defaults (file left untouched)"
+                );
+                Self::default()
+            }
+        }
+    }
+
+    /// Persist configuration to `path`, creating parent directories.
+    pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+        let mut cfg = self.clone();
+        cfg.normalize();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ConfigError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let text = toml::to_string_pretty(&cfg)?;
+        std::fs::write(path, text).map_err(|source| ConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    /// Clamp/normalize values that could otherwise break the app.
+    fn normalize(&mut self) {
+        if self.poll_interval_secs == 0 {
+            self.poll_interval_secs = DEFAULT_POLL_INTERVAL_SECS;
+        }
+        if self.config_version == 0 {
+            self.config_version = CONFIG_VERSION;
+        }
+    }
+
+    /// Effective poll interval as a duration.
+    pub fn poll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.poll_interval_secs.max(1))
+    }
+
+    /// Timestamp helper exposed for callers that log config changes.
+    pub fn loaded_at(&self) -> String {
+        clock::now_iso()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let cfg = AppConfig {
+            config_version: CONFIG_VERSION,
+            adb_mode: AdbMode::Manual {
+                path: PathBuf::from("/opt/adb"),
+            },
+            global_backup_dir: Some(PathBuf::from("/mnt/backups")),
+            poll_interval_secs: 9,
+            managed_adb_dir: Some(PathBuf::from("/data/pt")),
+        };
+        cfg.save(&path).unwrap();
+        let loaded = AppConfig::load(&path);
+        assert_eq!(loaded, cfg);
+    }
+
+    #[test]
+    fn missing_file_yields_defaults_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let cfg = AppConfig::load(&path);
+        assert_eq!(cfg, AppConfig::default());
+        assert!(!path.exists(), "load must never create the file");
+    }
+
+    #[test]
+    fn corrupt_file_falls_back_and_leaves_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "this is not toml {{{").unwrap();
+        let cfg = AppConfig::load(&path);
+        assert_eq!(cfg, AppConfig::default());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "this is not toml {{{",
+            "load must not rewrite a corrupt file"
+        );
+    }
+
+    #[test]
+    fn unknown_fields_are_ignored_and_partial_files_use_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "poll_interval_secs = 7\nfuture_option = true\n").unwrap();
+        let cfg = AppConfig::load(&path);
+        assert_eq!(cfg.poll_interval_secs, 7);
+        assert_eq!(cfg.adb_mode, AdbMode::Managed);
+        assert_eq!(cfg.config_version, CONFIG_VERSION);
+    }
+
+    #[test]
+    fn zero_poll_interval_is_normalized() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "poll_interval_secs = 0\n").unwrap();
+        let cfg = AppConfig::load(&path);
+        assert_eq!(cfg.poll_interval_secs, DEFAULT_POLL_INTERVAL_SECS);
+    }
+
+    #[test]
+    fn explicit_manual_adb_path_survives_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let cfg = AppConfig {
+            adb_mode: AdbMode::Manual {
+                path: PathBuf::from("/usr/bin/adb"),
+            },
+            ..AppConfig::default()
+        };
+        cfg.save(&path).unwrap();
+        assert_eq!(AppConfig::load(&path).adb_mode, cfg.adb_mode);
+    }
+
+    #[test]
+    fn default_backup_dir_is_home_based() {
+        let dir = default_backup_dir().unwrap();
+        assert!(dir.ends_with("AndroidBackups"), "{dir:?}");
+    }
+
+    #[test]
+    fn app_paths_layout() {
+        let paths = AppPaths::with_root(Path::new("/cfg"), Path::new("/data"));
+        assert_eq!(
+            paths.config_file,
+            PathBuf::from("/cfg/android-backup/config.toml")
+        );
+        assert_eq!(
+            paths.managed_adb_dir,
+            PathBuf::from("/data/android-backup/platform-tools")
+        );
+        assert_eq!(paths.log_dir, PathBuf::from("/data/android-backup/logs"));
+    }
+}
