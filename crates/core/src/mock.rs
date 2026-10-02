@@ -369,8 +369,14 @@ impl MockRemote {
 
     /// The next `n` pulls of `path` fail with a transient error (unplugged cable).
     pub fn with_transient_pull_failures(self, path: &str, n: u32) -> Self {
-        self.mutate(path, |file| file.transient_failures = n);
+        self.set_transient_pull_failures(path, n);
         self
+    }
+
+    /// Arm a transient failure on a phone that is already being used, as the
+    /// scenario suites do when the cable comes out mid-run.
+    pub fn set_transient_pull_failures(&self, path: &str, n: u32) {
+        self.mutate(path, |file| file.transient_failures = n);
     }
 
     /// The next `n` pulls of `path` fail because the phone is not authorized.
@@ -621,4 +627,192 @@ fn sha256_hex(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
     hex::encode(hasher.finalize())
+}
+
+// ---------------------------------------------------------------------------
+// platform-tools installer doubles
+// ---------------------------------------------------------------------------
+
+/// Build an in-memory zip with the given `(name, bytes)` entries.
+///
+/// Entries are stored uncompressed so the fixtures stay trivial to reason
+/// about; names are taken verbatim, which is how zip-slip cases are built.
+pub fn platform_tools_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Write as _;
+    use zip::write::SimpleFileOptions;
+
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut buffer);
+        let options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .unix_permissions(0o755);
+        for (name, bytes) in entries {
+            writer.start_file(*name, options).expect("start entry");
+            writer.write_all(bytes).expect("write entry");
+        }
+        writer.finish().expect("finish zip");
+    }
+    buffer.into_inner()
+}
+
+/// A manifest in the shape Google publishes, with one `platform-tools` package.
+///
+/// `archives` is `(host-os, size, digest kind, digest hex, url)`.
+pub fn manifest_with_platform_tools(
+    revision: (u32, u32, u32),
+    archives: &[(&str, u64, &str, &str, &str)],
+) -> String {
+    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<sdkRepository>\n");
+    xml.push_str(" <remotePackage path=\"platform-tools\">\n");
+    xml.push_str(&format!(
+        "  <revision><major>{}</major><minor>{}</minor><micro>{}</micro></revision>\n",
+        revision.0, revision.1, revision.2
+    ));
+    xml.push_str("  <archives>\n");
+    for (os, size, kind, hex, url) in archives {
+        xml.push_str(&format!(
+            "   <archive><complete><size>{size}</size><checksum type=\"{kind}\">{hex}</checksum><url>{url}</url></complete><host-os>{os}</host-os></archive>\n"
+        ));
+    }
+    xml.push_str("  </archives>\n </remotePackage>\n</sdkRepository>\n");
+    xml
+}
+
+/// A scripted [`crate::adb::installer::Fetcher`].
+///
+/// Understands the failure modes the installer has to survive: a response that
+/// stops early, a corrupt body, a 404, a mid-stream error and cancellation.
+pub struct MockFetcher {
+    state: Mutex<FetcherState>,
+}
+
+#[derive(Default)]
+struct FetcherState {
+    manifest: Option<String>,
+    files: std::collections::HashMap<String, Vec<u8>>,
+    /// The next N file downloads stop half-way (as a short read).
+    truncate_requests: u32,
+    /// Every request, in order; asserted on to prove a retry happened.
+    requests: Vec<String>,
+    /// Bytes at which a download gives up with a network error.
+    fail_after: Option<u64>,
+}
+
+impl MockFetcher {
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(FetcherState::default()),
+        }
+    }
+
+    pub fn with_manifest(self, xml: &str) -> Self {
+        self.state.lock_or_recover().manifest = Some(xml.to_string());
+        self
+    }
+
+    pub fn with_file(self, url: &str, bytes: Vec<u8>) -> Self {
+        self.state
+            .lock_or_recover()
+            .files
+            .insert(url.to_string(), bytes);
+        self
+    }
+
+    /// Make the next `count` downloads stop half-way.
+    pub fn truncating(self, count: u32) -> Self {
+        self.state.lock_or_recover().truncate_requests = count;
+        self
+    }
+
+    /// Break a download after `bytes`, as a flaky connection would.
+    pub fn failing_after(self, bytes: u64) -> Self {
+        self.state.lock_or_recover().fail_after = Some(bytes);
+        self
+    }
+
+    pub fn requests(&self) -> Vec<String> {
+        self.state.lock_or_recover().requests.clone()
+    }
+}
+
+impl Default for MockFetcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::adb::installer::Fetcher for MockFetcher {
+    fn get(&self, url: &str) -> Result<Vec<u8>, crate::adb::installer::InstallError> {
+        use crate::adb::installer::InstallError;
+        let mut state = self.state.lock_or_recover();
+        state.requests.push(url.to_string());
+        match state.manifest.clone() {
+            Some(xml) => Ok(xml.into_bytes()),
+            None => Err(InstallError::Http {
+                url: url.to_string(),
+                status: 404,
+            }),
+        }
+    }
+
+    fn get_to_file(
+        &self,
+        url: &str,
+        dest: &std::path::Path,
+        on_progress: &mut dyn FnMut(u64, Option<u64>) -> crate::adb::installer::Control,
+    ) -> Result<(), crate::adb::installer::InstallError> {
+        use crate::adb::installer::{Control, InstallError};
+        let mut state = self.state.lock_or_recover();
+        state.requests.push(url.to_string());
+        let bytes = match state.files.get(url) {
+            Some(bytes) => bytes.clone(),
+            None => {
+                return Err(InstallError::Http {
+                    url: url.to_string(),
+                    status: 404,
+                })
+            }
+        };
+        let total = bytes.len() as u64;
+        let truncate = state.truncate_requests > 0;
+        if truncate {
+            state.truncate_requests -= 1;
+        }
+        let fail_after = state.fail_after;
+        drop(state);
+
+        let cut = if truncate {
+            bytes.len() / 2
+        } else {
+            bytes.len()
+        };
+        let mut written = Vec::with_capacity(cut);
+        for (index, chunk) in bytes[..cut].chunks(64 * 1024).enumerate() {
+            written.extend_from_slice(chunk);
+            let done = (index as u64 + 1) * 64 * 1024;
+            let done = done.min(written.len() as u64);
+            if fail_after.is_some_and(|limit| done >= limit) {
+                return Err(InstallError::Network {
+                    url: url.to_string(),
+                    source: "simulated connection reset".into(),
+                });
+            }
+            if on_progress(done, Some(total)) == Control::Cancel {
+                return Err(InstallError::Cancelled);
+            }
+        }
+        std::fs::write(dest, &written).map_err(|source| InstallError::Io {
+            path: dest.to_path_buf(),
+            source,
+        })?;
+        if truncate {
+            return Err(InstallError::DownloadIncomplete {
+                url: url.to_string(),
+                expected: total,
+                got: written.len() as u64,
+            });
+        }
+        Ok(())
+    }
 }
