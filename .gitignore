@@ -2,3 +2,5 @@
 *.partial
 /*.local.toml
 .DS_Store
+.cache/
+dist/
