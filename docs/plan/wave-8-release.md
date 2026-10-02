@@ -4,6 +4,14 @@ Up: [index.md](index.md) · Prereq: Wave 7 gate passed.
 Goal: a user with **no Rust, no toolchain, no Android SDK** (plan §15) gets a
 working binary for their OS from a GitHub Release, plus docs that get them running.
 
+> **Status: implemented.** The scripts and the workflows exist; the acceptance
+> record is [`../acceptance.md`](../acceptance.md), and the release procedure
+> itself is [`../release.md`](../release.md). Three things the plan below asked for
+> were changed on purpose while building it, each noted inline: the AppImage is
+> built and shipped but demoted to a secondary, best-effort artifact; the
+> Windows verification is CI-only (there is no Windows machine on this side); and
+> the acceptance table lives in `acceptance.md` rather than `testing.md`.
+
 ## E08.1 Windows artifact
 
 **Actions**
@@ -27,6 +35,9 @@ working binary for their OS from a GitHub Release, plus docs that get them runni
 1. job `release-linux`: pinned ubuntu build container → AppImage first
    (`linuxdeploy` + AppImageKit), embedding `adb`? **No** — adb is managed at
    runtime by E07.1; do not bundle platform-tools (licensing + staleness).
+   *Built as asked, but with a pinned `appimagetool` rather than `linuxdeploy`, and
+   demoted: the tarball is the recommended Linux artifact and a failed AppImage
+   build is dropped from the release instead of blocking it (`release.md` §1).*
 2. Confirm egui/winit runtime deps: with the standard winit + x11 path, required
    system libs are basic X11/GL ones; list them in AppImage metadata + docs
    (AppImage's point is to minimize these — verify with ldd on the binary and
@@ -75,6 +86,9 @@ working binary for their OS from a GitHub Release, plus docs that get them runni
 3. Record results in `docs/testing.md`; any failure → append a numbered fix task
    to `index.md` progress tracker under "Post-acceptance fixes" and iterate until
    green. **This run is the project's definition of MVP-done (plan §16).**
+   *Recorded in [`../acceptance.md`](../acceptance.md) instead, which `testing.md`
+   §5 links: per-release acceptance is a different artifact from "which suites
+   run". No failures, so nothing was opened under "Post-acceptance fixes".*
 
 **Accept**
 - `docs/testing.md` has a fully-checked acceptance table for both OSes with

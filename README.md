@@ -12,12 +12,21 @@ files from Android devices over ADB — no Android Studio, no cloud account.
 
 ## Status
 
-Wave 6 of 9: the desktop UI is in place and the backup engine passes its mock
-end-to-end gate. The app can be run today; what is still missing is the managed ADB
-installer (Wave 7) and the release artifacts (Wave 8).
+Wave 8 of 9: the MVP is feature-complete. The backup engine, the SQLite manifest
+and the desktop UI are implemented and green (421 automated checks), and the
+release pipeline builds a portable Windows ZIP and a Linux tarball — plus a
+best-effort AppImage — from a version tag.
 
+[`docs/acceptance.md`](docs/acceptance.md) is the item-by-item record of the MVP
+definition of done, with the evidence for each row. What is left is *observation*
+rather than code — a real phone, a real Windows desktop, and one person who is not
+the author following the docs — and each of those has a short procedure in that
+document.
+
+* [`docs/setup.md`](docs/setup.md) — install, first launch, USB debugging, udev rules
+* [`docs/troubleshooting.md`](docs/troubleshooting.md) — when the device is not there
+* [`docs/release.md`](docs/release.md) — how a release is cut, and why the builds are unsigned
 * [`docs/plan/index.md`](docs/plan/index.md) — the executable build plan (progress)
-* [`docs/overview_plan.md`](docs/overview_plan.md) — the product plan
 * [`docs/testing.md`](docs/testing.md) — what is tested automatically, and the
   manual run matrix
 
@@ -40,7 +49,7 @@ Requires a stable Rust toolchain.
 
 ```bash
 cargo run --release -p android-backup-desktop   # open the app
-cargo test --workspace                          # 414 tests (1 ignored, live-network)
+cargo test --workspace                          # 421 tests (1 ignored, live-network)
 cargo fmt --check && cargo clippy --workspace --all-targets
 ```
 

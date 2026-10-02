@@ -22,7 +22,7 @@ manual rows below stay **PENDING** until a human with hardware fills them in.
 | Device fixtures | `cargo test -p android-backup-core --test device_listing_fixtures` (8) | `adb devices -l` parsing across CRLF, spacing, daemon chatter and 11 real-world fixtures |
 | Engine E2E | `cargo test -p android-backup-core --test e2e_backup` (25) | The whole backup engine on a scripted phone (Wave 5 hard gate) |
 | Reliability scenarios | `cargo test -p android-backup-core --test scenario_*` (23) | Disconnect, unauthorized, crash mid-write, duplicate names, corrupt manifest, 50k files, history/versioning |
-| UI unit | `cargo test -p android-backup-desktop --lib` (50) | View model folding, gating, intents, startup planning, logging, managed-install flow |
+| UI unit | `cargo test -p android-backup-desktop --lib` (57) | View model folding, gating, intents, startup planning, logging, managed-install flow |
 | UI headless | `cargo test -p android-backup-desktop --test ui_headless` (13) | Real `egui::Context::run` frames, asserting the text actually laid out (incl. install progress + cancel) |
 | Architecture | `cargo test -p android-backup-desktop --test architecture` (4) | No backup logic in the UI, no `egui` in core, one `eframe::App`, UI folds core types |
 | Live installer (network) | `cargo test -p android-backup-core --test installer_network` (2 + 1 ignored) | The managed install against Google itself: live manifest, live digest, extracted adb really runs. See §3 |
@@ -41,7 +41,7 @@ file ever existing), but this checkout has no remote, so they have never execute
 The `apt-get` list for the Linux GUI build is the one line most likely to need an
 edit on that first run.
 
-Last full run: **414 tests, 0 failed, 1 ignored** (Linux, rustc 1.97.1), also green under 8-way CPU load. Also verified:
+Last full run: **421 tests, 0 failed, 1 ignored** (Linux, rustc 1.97.1), also green under 8-way CPU load. Also verified:
 `cargo build --release -p android-backup-desktop` succeeds, and the release
 binary, started with no display available, exits 0 after logging
 `could not open the window: … neither WAYLAND_DISPLAY nor WAYLAND_SOCKET nor DISPLAY is set`
@@ -201,7 +201,7 @@ via `continue-on-error`, so a Google outage can never block a PR.
 Still PENDING: the same run on **Windows** (where `AdbWinApi.dll`/`AdbWinUsbApi.dll`
 must survive the allow-list), the proxy/offline case (what the modal says when the
 manifest host is unreachable), and a network drop mid-download. Tagged
-`hw-verify-needed` for E08.4.
+`hw-verify-needed`, tracked in `acceptance.md` §3.
 
 ---
 
@@ -218,11 +218,30 @@ manifest host is unreachable), and a network drop mid-download. Tagged
 
 ---
 
-## 5. Known gaps entering Wave 8
+## 5. Release verification (Wave 8)
 
-- **A real phone has never been used.** Everything is mock-driven; the Wave 6/8
-  human matrix in §2 is still PENDING.
-- **Managed ADB is installed but never exercised end-to-end** (see §3).
-- **Windows is unverified**: nothing has been built or run there yet (E08.1).
-- **Resume after re-authorization is manual** by design: the engine pauses and the
-  UI explains, the user presses Resume (automatic re-arm is out of scope, plan §13).
+**The acceptance record is [`acceptance.md`](acceptance.md).** It holds the
+item-by-item MVP run (the E08.4 gate of plan §12/§16): what was checked, how, the
+result, and — just as importantly — what is still unobserved, with a short
+procedure for closing each row. Keep results there rather than here; this
+document is about the suites and the manual matrix, that one is about whether the
+*product* is done.
+
+What the artifact-level checks add to the suites above:
+
+| Check | Command | What it proves |
+|-------|---------|----------------|
+| Linux artifact | `scripts/package-linux.sh` then `scripts/smoke-linux.sh dist/*/android-backup` | The packaged tarball installs without root and its binary opens a window on a bare desktop (`Xvfb`, throwaway `HOME`, `env -i`) |
+| Linux AppImage | `scripts/build-appimage.sh` then `scripts/smoke-linux.sh dist/*.AppImage` | The extracted payload of the wrapper runs the same way. Secondary artifact: mounting it needs FUSE, which the smoke test avoids on purpose |
+| Runtime requirements | `scripts/check-glibc.sh <binary>`; `dist/*.deps.txt` | The glibc floor and the `ldd` list of the exact binary that was packaged |
+| Windows artifact | `scripts/package-windows.ps1`, `scripts/smoke-windows.ps1` | Portable ZIP; the `.exe` reports its version, refuses a bogus argument, and creates its data directory in an isolated `%APPDATA%`. **Not yet run on Windows** — the release workflow does that |
+| Tag sanity | `scripts/verify-tag.sh v0.1.0` | A tag that disagrees with `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md` or the required docs cannot be built |
+
+Still PENDING, and tracked as rows in `acceptance.md`: a real phone beyond the
+maintainer's first run, a real Windows desktop (incl. the managed `adb` install),
+the published artifact's glibc floor, mounting the AppImage, a non-author dry run
+of the docs, and the UI seen on a real screen.
+
+One design point that is a decision rather than a gap: **resume after
+re-authorization is manual** — the engine pauses and the UI explains, the user
+presses Resume. Automatic re-arm is out of scope (plan §13).

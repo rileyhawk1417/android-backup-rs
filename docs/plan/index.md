@@ -230,10 +230,66 @@ Decisions taken while building this wave:
   with its staging directory removed on the way out.
 
 Wave 8 — Release
-- [ ] E08.1 Windows artifact
-- [ ] E08.2 Linux artifact
-- [ ] E08.3 Publish + docs
-- [ ] E08.4 MVP acceptance run
+- [x] E08.1 Windows artifact
+- [x] E08.2 Linux artifact
+- [x] E08.3 Publish + docs
+- [x] E08.4 MVP acceptance run
+
+**Wave 8 gate: PASSED for everything this machine can check; the MVP acceptance
+record is [`docs/acceptance.md`](../acceptance.md), and it names what is still
+unobserved.** E08.1: `scripts/package-windows.ps1` stages the `.exe`, README,
+licences and docs into `android-backup-<v>-windows-x86_64.zip`, and
+`smoke-windows.ps1` checks `--version`, the handling of an unknown argument, and
+that a first run creates its data directory inside an isolated `%APPDATA%`.
+Nothing has been built or run on Windows yet — the release workflow's
+`windows-latest` job is the first real run — so the script logic was exercised
+here under PowerShell 7 with a stand-in binary, and the Windows rows in
+`acceptance.md` stay PENDING until CI says otherwise. The signing decision
+(E08.1 item 3, whose deliverable is the decision itself) is recorded in [`docs/release.md`](../release.md)
+§3: unsigned for the MVP, with what signing would buy, why it is not in yet, and
+the follow-up. E08.2: `package-linux.sh` builds the tarball (binary, `install.sh`,
+launcher, icon, docs, `.deps.txt`), `build-appimage.sh` builds the AppImage from a
+pinned `appimagetool` with its checksum verified, `check-glibc.sh` reports the
+glibc floor, and `smoke-linux.sh` proves the *artifact* starts: private `Xvfb`,
+`env -i`, throwaway `HOME`, window title asserted. `ldd` shows only
+`libc`/`libm`/`libgcc_s`/`ld-linux`; X11, Wayland, GL and GTK are `dlopen`ed from
+the host desktop, and both udev rule sets (Ubuntu package, Arch package) are in
+`setup.md` §5. `adb` is not bundled — E07.1 installs it at runtime. The `.deb`
+stays deferred. E08.3: `release.yml` runs verify → linux → windows → publish on a
+`v*` tag, with `bump-version.sh`, `verify-tag.sh` and `release-notes.sh` beside it,
+plus `CHANGELOG.md`, `setup.md`, `troubleshooting.md` and `release.md`. E08.4:
+`acceptance.md` records the MVP run item by item — 421 automated checks green, the
+first backup on the maintainer's own phone, and an explicit PENDING list with a
+procedure per row. No failures, so the "Post-acceptance fixes" tracker is empty.
+
+Decisions taken while building this wave:
+- **The AppImage is secondary, and CI treats it that way.** The tarball is the
+  artifact we stand behind; the AppImage wraps the same binary but depends on
+  FUSE and on AppImageLauncher behaving. A failed AppImage build or smoke test is
+  therefore dropped from the release (`continue-on-error` plus a delete step)
+  rather than blocking it — and never shipped as a known-broken download.
+- **The release is created as a draft.** Notes and checksums get one human read
+  before they are visible; publishing is one click, correcting a published
+  release is not.
+- **The pipeline installs its own toolchain and uses the runner's own `gh`.**
+  Inside `debian:12-slim` that means rustup via `curl`, and for publishing
+  `gh release create` instead of a third-party release action: one dependency
+  fewer in the path that can publish artifacts.
+- **Packaging scripts build the binary themselves** (`cargo build --release
+  --locked`), so "package a release" is one command per OS and CI cannot package a
+  stale or differently-flagged build.
+- **The glibc floor we advertise is the container's, not this desktop's.** A local
+  build needs 2.43 (this machine's distribution); the release builds in
+  `debian:12-slim` for a 2.36 floor and records the result in the artifact's
+  `.deps.txt`, so the promise is per release and auditable.
+- **The signing decision is written down rather than skipped** (`release.md` §3),
+  including the limit of the mitigation: a checksum served beside the artifact
+  protects against a bad download, not against a compromised account.
+- **One plan deviation, on purpose:** E08.4 asked for the acceptance table to live
+  in `docs/testing.md`. It lives in [`docs/acceptance.md`](../acceptance.md)
+  instead — a per-release record with its own evidence, which `testing.md` §5 and
+  `release.md` both link — because the answer to "is the product done" is not the
+  same table as "which suites run".
 
 ## References
 
