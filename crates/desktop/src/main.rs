@@ -22,6 +22,26 @@ use android_backup_desktop::startup::{AdbInstaller, ManagedInstaller};
 use android_backup_desktop::window;
 
 fn main() {
+    // Before anything else, and before any display: a release binary has to be
+    // able to say which build it is on a machine with no window server, no
+    // config, and no adb. The packaging scripts rely on it too.
+    match android_backup_desktop::cli::parse(std::env::args().skip(1)) {
+        android_backup_desktop::cli::Cli::Run => {}
+        android_backup_desktop::cli::Cli::Version => {
+            println!("{}", android_backup_desktop::cli::version_line());
+            return;
+        }
+        android_backup_desktop::cli::Cli::Help => {
+            println!("{}", android_backup_desktop::cli::help_text());
+            return;
+        }
+        android_backup_desktop::cli::Cli::Unknown(argument) => {
+            eprintln!("android-backup: unrecognised argument '{argument}'\n");
+            eprintln!("{}", android_backup_desktop::cli::help_text());
+            std::process::exit(2);
+        }
+    }
+
     let paths = match window::discover_paths() {
         Ok(paths) => paths,
         Err(message) => {

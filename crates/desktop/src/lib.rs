@@ -5,6 +5,7 @@
 //! no comparison, no transfer, no hashing. See the module docs:
 //!
 //! * [`view`] — the view model (no `egui`): folding events into renderable state.
+//! * [`cli`] — `--version`/`--help`, for a release binary with no display.
 //! * [`logging`] — where the log file lives and how the level is chosen.
 //! * [`startup`] — first-launch decisions and adb resolution.
 //! * [`app`] — application state and the intent handlers behind the widgets.
@@ -16,6 +17,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod app;
+pub mod cli;
 pub mod logging;
 pub mod startup;
 pub mod testutil;
