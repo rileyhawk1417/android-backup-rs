@@ -18,10 +18,22 @@ pub use quarantine::{open_or_quarantine, QuarantineReport};
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use rusqlite::Connection;
 
 pub use migrations::SCHEMA_VERSION;
+
+/// How long [`Db::open_file`] keeps starting over while another instance holds
+/// the write lock.
+///
+/// The contention it exists for is a *migration* (milliseconds), so this is
+/// generous; the point of the bound is that a genuinely stuck lock surfaces as an
+/// error instead of hanging the app at startup forever.
+const OPEN_DEADLINE: Duration = Duration::from_secs(15);
+
+/// Sleep between open attempts. Short, because the other side is one DDL batch.
+const OPEN_BACKOFF: Duration = Duration::from_millis(25);
 
 /// Errors from manifest storage.
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +77,22 @@ impl DbError {
                 err.sqlite_error_code(),
                 Some(rusqlite::ErrorCode::DatabaseCorrupt)
                     | Some(rusqlite::ErrorCode::NotADatabase)
+            ),
+            _ => false,
+        }
+    }
+
+    /// True when SQLite refused because *another* connection holds a lock.
+    ///
+    /// `SQLITE_BUSY` and `SQLITE_LOCKED` are the two ways that happens, and both
+    /// are temporary by definition — the other side is a second instance of this
+    /// app migrating the same fresh manifest, and it will be done in
+    /// milliseconds. [`Db::open_file`] retries on exactly this.
+    pub fn is_busy(&self) -> bool {
+        match self {
+            Self::Sql(err) => matches!(
+                err.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy) | Some(rusqlite::ErrorCode::DatabaseLocked)
             ),
             _ => false,
         }
@@ -115,6 +143,15 @@ impl Db {
     }
 
     /// Open (creating if needed) a database file.
+    ///
+    /// Two instances starting at the same moment both want the write lock: the
+    /// app and, say, a second copy of it, or a recovery helper. `busy_timeout`
+    /// covers most of that, but not the paths where SQLite deliberately does
+    /// *not* consult the busy handler — switching the journal mode to WAL needs
+    /// exclusive access, and a lock upgrade aborts rather than waits. Those come
+    /// back as `SQLITE_BUSY` immediately, so the answer is to throw the
+    /// connection away and start over; the whole attempt is bounded by
+    /// [`OPEN_DEADLINE`].
     pub fn open_file(path: &Path) -> Result<Self, DbError> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -124,13 +161,29 @@ impl Db {
                 })?;
             }
         }
-        let conn = Connection::open(path)?;
-        let db = Self {
-            conn: Mutex::new(conn),
-        };
-        db.apply_pragmas(true)?;
-        db.migrate()?;
-        Ok(db)
+        let deadline = std::time::Instant::now() + OPEN_DEADLINE;
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let db = Self {
+                conn: Mutex::new(Connection::open(path)?),
+            };
+            match db.apply_pragmas(true).and_then(|()| db.migrate()) {
+                Ok(_) => return Ok(db),
+                Err(err) if err.is_busy() && std::time::Instant::now() < deadline => {
+                    tracing::debug!(
+                        attempt,
+                        path = %path.display(),
+                        "manifest is locked by another instance; starting over"
+                    );
+                    // Dropping `db` closes the connection, releasing any lock
+                    // it still holds, before the next attempt opens a new one.
+                    drop(db);
+                    std::thread::sleep(OPEN_BACKOFF);
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     /// Lock the underlying connection.
@@ -153,8 +206,15 @@ impl Db {
         conn.busy_timeout(std::time::Duration::from_millis(5000))?;
         if file_backed {
             // WAL keeps a reader from blocking the writer and survives a crash
-            // without corrupting committed transactions.
-            conn.pragma_update(None, "journal_mode", "WAL")?;
+            // without corrupting committed transactions. Only switch when it is
+            // not already WAL: this pragma needs exclusive access, and it is the
+            // one call that reports `SQLITE_BUSY` *without* consulting the busy
+            // handler, so asking for the mode we are already in is a needless
+            // way to lose a race with another instance.
+            let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+            if !mode.eq_ignore_ascii_case("wal") {
+                conn.pragma_update(None, "journal_mode", "WAL")?;
+            }
         }
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -306,5 +366,56 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM devices", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0, "rolled back");
+    }
+
+    #[test]
+    fn a_lock_held_by_someone_else_is_recognised_as_temporary() {
+        // The classification [`Db::open_file`] retries on. Without a short busy
+        // timeout this would take 5 s, so the test sets its own.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.db");
+        drop(Db::open_file(&path).unwrap());
+
+        let holder = Connection::open(&path).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let other = Connection::open(&path).unwrap();
+        other.busy_timeout(Duration::from_millis(10)).unwrap();
+        let err = other.execute_batch("BEGIN IMMEDIATE").unwrap_err();
+        let err = DbError::Sql(err);
+        assert!(err.is_busy(), "{err:?} should be temporary");
+        assert!(!err.is_corrupt(), "a lock is not a damaged file");
+        assert!(
+            !DbError::VersionSkew {
+                found: 2,
+                supported: 1
+            }
+            .is_busy(),
+            "a newer schema must not be retried"
+        );
+    }
+
+    #[test]
+    fn a_second_instance_reopens_a_migrated_manifest_without_waiting() {
+        // The happy path for "two copies of the app started at once": once the
+        // schema is in place, opening reads `user_version`, finds it current and
+        // never asks for a write lock — so it cannot lose a race, however long
+        // the other instance holds the lock.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.db");
+        drop(Db::open_file(&path).unwrap());
+
+        let holder = Connection::open(&path).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let started = std::time::Instant::now();
+        let db = Db::open_file(&path).expect("a busy writer must not block a reader");
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "opening waited {:?} on a lock it does not need",
+            started.elapsed()
+        );
+        holder.execute_batch("ROLLBACK").unwrap();
     }
 }
