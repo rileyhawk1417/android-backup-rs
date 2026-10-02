@@ -866,11 +866,17 @@ impl Installer {
         os: HostOs,
         on_progress: &mut dyn FnMut(Progress) -> Control,
     ) -> Result<InstallReport, InstallError> {
-        on_progress(Progress {
+        // The modal is up before this thread starts, so the user can cancel in
+        // the few hundred milliseconds before the manifest is fetched. Honour
+        // it here: a cancel must never wait for a network round trip.
+        if on_progress(Progress {
             stage: Stage::Manifest,
             done: 0,
             total: None,
-        });
+        }) == Control::Cancel
+        {
+            return Err(InstallError::Cancelled);
+        }
         let package = self.plan(os)?;
         tracing::info!(
             revision = %package.revision,
