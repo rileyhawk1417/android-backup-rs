@@ -16,7 +16,7 @@ use android_backup_core::backup::destination::{FsProbe, LocalFsProbe};
 use android_backup_core::backup::enumerate::AdbRemoteFiles;
 use android_backup_core::backup::RemoteFiles;
 use android_backup_core::config::AppConfig;
-use android_backup_core::database::Db;
+use android_backup_core::database::open_or_quarantine;
 use android_backup_desktop::app::AppDeps;
 use android_backup_desktop::window;
 
@@ -79,10 +79,20 @@ fn run(paths: android_backup_core::config::AppPaths) -> Result<(), String> {
         .map(|adb| Arc::new(AdbRemoteFiles::new(adb)) as Arc<dyn RemoteFiles>);
     let probe: Arc<dyn FsProbe> = Arc::new(LocalFsProbe::new());
 
-    let db = Arc::new(
-        Db::open_file(&paths.data_dir.join("manifest.db"))
-            .map_err(|err| format!("could not open the backup manifest: {err}"))?,
-    );
+    // A manifest that cannot be read is not a startup failure: it is an index,
+    // never the only copy of anything (plan §9), so the app starts with a fresh
+    // one and keeps the damaged file for the user to inspect (E07.3).
+    let manifest_path = paths.data_dir.join("manifest.db");
+    let (db, quarantined) = open_or_quarantine(&manifest_path)
+        .map_err(|err| format!("could not open the backup manifest: {err}"))?;
+    if let Some(quarantined) = &quarantined {
+        tracing::error!(summary = %quarantined.summary(), "manifest replaced");
+        report(
+            "The backup manifest could not be read",
+            &quarantined.guidance,
+        );
+    }
+    let db = Arc::new(db);
     db.migrate()
         .map_err(|err| format!("could not prepare the backup manifest: {err}"))?;
 

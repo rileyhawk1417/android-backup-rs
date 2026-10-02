@@ -1,10 +1,15 @@
 //! Embedded, versioned schema migrations.
 //!
-//! Each migration runs in its own transaction together with the
-//! `PRAGMA user_version` bump, so a crash mid-migration leaves the database on
-//! the previous version rather than half-migrated.
+//! The whole migration set runs inside one `BEGIN IMMEDIATE` transaction
+//! together with the `PRAGMA user_version` bump, which buys two properties:
+//!
+//! * **crash safety** — a process that dies mid-migration leaves the database on
+//!   the previous version rather than half-migrated;
+//! * **no two migrators** — two instances starting at the same moment (the app
+//!   plus, say, a recovery helper, or the crash-worker test) serialise on the
+//!   write lock instead of both racing to `CREATE TABLE`.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 
 use super::DbError;
 
@@ -23,23 +28,38 @@ pub fn user_version(conn: &Connection) -> Result<u32, DbError> {
 /// Apply all pending migrations, returning the resulting schema version.
 pub fn apply(conn: &mut Connection) -> Result<u32, DbError> {
     let current = user_version(conn)?;
-    if current > SCHEMA_VERSION {
-        return Err(DbError::VersionSkew {
-            found: current,
-            supported: SCHEMA_VERSION,
-        });
+    check_supported(current)?;
+    if current == SCHEMA_VERSION {
+        return Ok(current);
     }
+
+    // The optimistic check above avoids taking a write lock in the common case.
+    // Everything below runs under `BEGIN IMMEDIATE`, and the version is read
+    // again *inside* the lock: whatever we concluded before may already be stale.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current = user_version(&tx)?;
+    check_supported(current)?;
     for (version, sql) in MIGRATIONS {
         if *version <= current {
             continue;
         }
         tracing::info!(version, "applying database migration");
-        let tx = conn.transaction()?;
         tx.execute_batch(sql)?;
         tx.pragma_update(None, "user_version", *version)?;
-        tx.commit()?;
     }
-    user_version(conn)
+    let version = user_version(&tx)?;
+    tx.commit()?;
+    Ok(version)
+}
+
+fn check_supported(version: u32) -> Result<(), DbError> {
+    if version > SCHEMA_VERSION {
+        return Err(DbError::VersionSkew {
+            found: version,
+            supported: SCHEMA_VERSION,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -62,6 +82,31 @@ mod tests {
                 "migration numbering must be contiguous"
             );
             assert!(!sql.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn concurrent_migrators_do_not_collide() {
+        // Two instances starting against the same (brand new) file must not both
+        // try to create the schema; one migrates, the other waits and finds it
+        // done. Without `BEGIN IMMEDIATE` this fails with
+        // "table devices already exists".
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.db");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    super::super::Db::open_file(&path).map(|db| db.schema_version())
+                })
+            })
+            .collect();
+        for thread in threads {
+            let result = thread.join().unwrap();
+            assert_eq!(result.unwrap().unwrap(), SCHEMA_VERSION);
         }
     }
 

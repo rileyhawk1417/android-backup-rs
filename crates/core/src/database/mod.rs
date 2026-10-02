@@ -12,6 +12,9 @@ pub mod devices;
 pub mod files;
 pub mod jobs;
 mod migrations;
+mod quarantine;
+
+pub use quarantine::{open_or_quarantine, QuarantineReport};
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -45,6 +48,47 @@ pub enum DbError {
 
     #[error("no {what} found for {key}")]
     NotFound { what: &'static str, key: String },
+}
+
+impl DbError {
+    /// True when SQLite is telling us the file is not a database at all, or is
+    /// damaged beyond reading.
+    ///
+    /// This is deliberately narrow: a schema that is *newer* than this build
+    /// ([`DbError::VersionSkew`]) is not corruption, and neither is a permission
+    /// problem. Only these two codes mean "the bytes on disk are not a SQLite
+    /// database", which is the one case where starting over is better than
+    /// refusing to start.
+    pub fn is_corrupt(&self) -> bool {
+        match self {
+            Self::Sql(err) => matches!(
+                err.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseCorrupt)
+                    | Some(rusqlite::ErrorCode::NotADatabase)
+            ),
+            _ => false,
+        }
+    }
+
+    /// What to tell the user when [`DbError::is_corrupt`] is true.
+    /// What to tell the user when `original` could not be read and has been
+    /// moved to `stash`.
+    ///
+    /// Deliberately concrete: the file name is the one thing the user needs in
+    /// order to decide whether to keep, repair or delete it (§13).
+    pub fn repair_guidance(original: &Path, stash: &Path) -> String {
+        format!(
+            "The backup manifest at {} could not be read, so the app has started \
+             with an empty one.\n\n\
+             The unreadable file has been kept as {} — nothing was thrown away, \
+             and it can be repaired or deleted whenever you like.\n\n\
+             Your backed-up files are not affected: the manifest only records \
+             what has already been copied. The next backup will re-copy the \
+             files it no longer has a record of.",
+            original.display(),
+            stash.display()
+        )
+    }
 }
 
 /// Handle to the manifest database.
@@ -103,6 +147,10 @@ impl Db {
     /// Apply connection-level pragmas.
     fn apply_pragmas(&self, file_backed: bool) -> Result<(), DbError> {
         let conn = self.conn();
+        // First, so that every later statement (including the journal-mode
+        // switch and the migrations) waits instead of failing while another
+        // instance holds the write lock.
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
         if file_backed {
             // WAL keeps a reader from blocking the writer and survives a crash
             // without corrupting committed transactions.
@@ -110,7 +158,6 @@ impl Db {
         }
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
         Ok(())
     }
 
