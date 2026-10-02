@@ -40,9 +40,14 @@ Requires a stable Rust toolchain.
 
 ```bash
 cargo run --release -p android-backup-desktop   # open the app
-cargo test --workspace                          # 410 tests
+cargo test --workspace                          # 414 tests (1 ignored, live-network)
 cargo fmt --check && cargo clippy --workspace --all-targets
 ```
+
+CI (`.github/workflows/ci.yml`) runs exactly that on `ubuntu-latest` and
+`windows-latest`. `.github/workflows/nightly.yml` additionally runs the one test
+that touches the real world — installing `platform-tools` from Google — as a
+non-blocking job.
 
 The app keeps its manifest and its log under the platform data directory
 (`~/.local/share/android-backup/` on Linux, `%APPDATA%\android-backup\` on

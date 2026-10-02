@@ -18,15 +18,30 @@ manual rows below stay **PENDING** until a human with hardware fills them in.
 
 | Suite | Command | What it proves |
 |-------|---------|----------------|
-| Core unit | `cargo test -p android-backup-core --lib` (287) | ADB runner/parser/locator, manifest repositories, path sanitization, watcher, gate, engine internals, managed-installer manifest/zip/swap |
+| Core unit | `cargo test -p android-backup-core --lib` (289) | ADB runner/parser/locator, manifest repositories, path sanitization, watcher, gate, engine internals, managed-installer manifest/zip/swap |
 | Device fixtures | `cargo test -p android-backup-core --test device_listing_fixtures` (8) | `adb devices -l` parsing across CRLF, spacing, daemon chatter and 11 real-world fixtures |
 | Engine E2E | `cargo test -p android-backup-core --test e2e_backup` (25) | The whole backup engine on a scripted phone (Wave 5 hard gate) |
 | Reliability scenarios | `cargo test -p android-backup-core --test scenario_*` (23) | Disconnect, unauthorized, crash mid-write, duplicate names, corrupt manifest, 50k files, history/versioning |
 | UI unit | `cargo test -p android-backup-desktop --lib` (50) | View model folding, gating, intents, startup planning, logging, managed-install flow |
 | UI headless | `cargo test -p android-backup-desktop --test ui_headless` (13) | Real `egui::Context::run` frames, asserting the text actually laid out (incl. install progress + cancel) |
 | Architecture | `cargo test -p android-backup-desktop --test architecture` (4) | No backup logic in the UI, no `egui` in core, one `eframe::App`, UI folds core types |
+| Live installer (network) | `cargo test -p android-backup-core --test installer_network` (2 + 1 ignored) | The managed install against Google itself: live manifest, live digest, extracted adb really runs. See §3 |
 
-Last full run: **410 tests, 0 failed** (Linux, rustc 1.97.0). Also verified:
+CI (`.github/workflows/ci.yml`) runs fmt, clippy (`-D warnings`) and the whole
+suite on `ubuntu-latest` **and** `windows-latest`, so the Windows-only paths — the
+`adb.exe`/`AdbWin*.dll` allow-list, drive-letter sanitization, path separators —
+are compiled and tested from the first commit rather than discovered at release
+time. `.github/workflows/nightly.yml` runs the live installer test with
+`continue-on-error`, so a Google outage is a red nightly run and never a blocked
+pull request.
+
+**PENDING: the first green CI run on GitHub.** The workflows are in the tree
+(added after the Wave 7 audit caught that E00.3 had been marked done without the
+file ever existing), but this checkout has no remote, so they have never executed.
+The `apt-get` list for the Linux GUI build is the one line most likely to need an
+edit on that first run.
+
+Last full run: **414 tests, 0 failed, 1 ignored** (Linux, rustc 1.97.1), also green under 8-way CPU load. Also verified:
 `cargo build --release -p android-backup-desktop` succeeds, and the release
 binary, started with no display available, exits 0 after logging
 `could not open the window: … neither WAYLAND_DISPLAY nor WAYLAND_SOCKET nor DISPLAY is set`
@@ -165,11 +180,28 @@ What is proven automatically:
 | A cancel changes nothing; a failed install writes no config | `app.rs::cancelling_an_install_says_nothing_was_changed` |
 | One click = one download | `app.rs::a_second_install_request_while_one_is_running_is_ignored` |
 
-**PENDING (needs a network and a clean machine):** a real end-to-end install on
-Windows and on Linux — i.e. 9 MB really downloaded, `adb version` really printed,
-and the app really backing up with the managed binary. Also PENDING: the
-proxy/offline case (what the modal says when the manifest host is unreachable)
-and a mid-download network drop. Tagged `hw-verify-needed` for E08.4.
+**PASS (Linux, 2026-10-02, `Linux 7.2.6-1-cachyos`, rustc 1.97.1 — real network, real download).**
+`cargo test -p android-backup-core --test installer_network -- --ignored --nocapture`
+ran the whole production path (no fixtures, no `MockFetcher`) against
+`dl.google.com`:
+
+```
+installed adb 1.0.41 (platform-tools 37.0.1) from
+  https://dl.google.com/android/repository/platform-tools_r37.0.1-linux.zip
+  — 9054187 bytes, 3 files kept                       (3.84 s)
+```
+
+That single run covers the four things fixtures cannot: the live manifest still
+parses, the published digest still matches the served archive, the allow-list
+keeps the extraction to `adb` + `NOTICE` + `source.properties`, and the extracted
+binary **executes on this machine** (`adb version` exits 0 and reports the same
+version the installer's own probe saw). The test is `#[ignore]`d and runs nightly
+via `continue-on-error`, so a Google outage can never block a PR.
+
+Still PENDING: the same run on **Windows** (where `AdbWinApi.dll`/`AdbWinUsbApi.dll`
+must survive the allow-list), the proxy/offline case (what the modal says when the
+manifest host is unreachable), and a network drop mid-download. Tagged
+`hw-verify-needed` for E08.4.
 
 ---
 

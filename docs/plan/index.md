@@ -44,6 +44,14 @@ Wave 0 — Workspace & conventions
 - [x] E00.2 Error/log conventions
 - [x] E00.3 CI plumbing
 
+**E00.3 note (added during the Wave 7 audit):** the checkbox was ticked but
+`.github/workflows/` did not exist — the gate was recorded without its artifact.
+It now does: `ci.yml` (fmt + clippy `-D warnings` + the whole suite on
+`ubuntu-latest` **and** `windows-latest`) and `nightly.yml` (the live installer
+test, `continue-on-error`). Neither has run on GitHub yet, because this checkout
+has no remote; the first green run is the outstanding half of the gate and the
+`apt-get` list for the Linux GUI build is the most likely first edit.
+
 Wave 1 — ADB execution core
 - [x] E01.1 ADB locator
 - [x] E01.2 Command runner + error mapping
