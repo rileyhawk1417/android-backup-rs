@@ -182,9 +182,15 @@ pub struct EffectiveDestination {
 }
 
 /// Filesystem-safe folder name for a device.
+///
+/// A display name is free text typed by a human, not a path: separators are
+/// flattened first, so `Pixel/8` stays one folder and `/etc` can never move a
+/// backup out of the configured directory.
 pub fn device_folder_name(display_name: &str) -> String {
-    let cleaned = sanitize_component(display_name.trim());
-    if cleaned.is_empty() || cleaned == "_" {
+    let flattened = display_name.trim().replace(['/', '\\'], "_");
+    let cleaned = sanitize_component(&flattened);
+    if cleaned.trim_matches('_').is_empty() {
+        // Nothing usable in the name (empty, spaces, separators only).
         "device".to_string()
     } else {
         cleaned
@@ -284,6 +290,33 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".into(),
             last_seen_at: "2026-01-01T00:00:00Z".into(),
         }
+    }
+
+    #[test]
+    fn a_name_is_never_a_path() {
+        let global = Path::new("/home/me/AndroidBackups");
+        // A display name with separators stays a single folder inside `global`.
+        for name in ["Pixel/8", "/etc", "..", "../../escape", "  ", "///", "a\\b"] {
+            let dest = resolve(&device(1, name, "SER1", None), &[], Some(global)).unwrap();
+            assert!(
+                dest.root.starts_with(global),
+                "{name:?} escaped the backup directory: {}",
+                dest.root.display()
+            );
+            assert_eq!(
+                dest.root.parent(),
+                Some(global),
+                "{name:?} produced a nested folder: {}",
+                dest.root.display()
+            );
+        }
+        assert_eq!(device_folder_name("/etc"), "_etc");
+        assert_eq!(device_folder_name("Pixel/8"), "Pixel_8");
+        assert_eq!(
+            device_folder_name("Pixel/8/Pro \u{1}"),
+            "Pixel_8_Pro_",
+            "control characters are dropped, trailing space becomes _"
+        );
     }
 
     #[test]
