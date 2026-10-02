@@ -57,11 +57,43 @@ Wave 2 — Data foundation
 - [x] E02.5 App config
 
 Wave 3 — Device discovery & identity
-- [ ] E03.1 `adb devices -l` parser
-- [ ] E03.2 State mapping
-- [ ] E03.3 Property fetcher
-- [ ] E03.4 Polling watcher
-- [ ] E03.5 Authorization gate
+- [x] E03.1 `adb devices -l` parser
+- [x] E03.2 State mapping
+- [x] E03.3 Property fetcher
+- [x] E03.4 Polling watcher
+- [x] E03.5 Authorization gate
+
+**Wave 3 gate: PASSED.** 11 fixture files (`crates/core/tests/fixtures/devices/*.txt`)
+plus `crates/core/tests/device_listing_fixtures.rs` (8 tests: exhaustive expectation
+table, CRLF bytes, spacing matrix, corpus coverage) and the watcher suite in
+`crates/core/src/devices/watcher.rs` — including one test that drives the real
+thread through a scripted timeline (unauthorized → authorized → unplugged →
+adb dead → adb back) and asserts the exact event sequence, and one that counts
+sink upserts to prove enrichment is not written once per poll tick.
+
+Decisions taken while building this wave:
+- **One event per device per tick**, best-variant-wins: a transition to
+  `Connected` emits `DeviceEvent::Connected`, not `Connected` *and*
+  `StateChanged`. `StateChanged` covers transitions with no named variant
+  (i.e. into `Error`). `DeviceEvent` gained `PollFailed`/`PollRecovered`, which
+  are E03.4's "single Error event on transition into/out of the error condition"
+  in concrete form.
+- **`stop()` uses a condvar, not a bare `AtomicBool`**, so a UI with a 30s poll
+  interval still quits instantly (the wave doc's accept asks for "joins within one
+  poll interval" — this is stronger).
+- **Everything above the `List of devices attached` header is discarded**, and a
+  space-separated entry must carry a known state token. Real adb prints
+  `adb server version (41) doesn't match this client (39)` before the header;
+  before this rule that line parsed as a phantom device called `adb`, and a
+  phantom device is one the user cannot explain or remove.
+- **A failed poll keeps the last good snapshot** and flags it (`last_poll_ok()`),
+  so the UI can say "the list may be stale" instead of silently showing a phone
+  that has been unplugged.
+- **`DeviceInfo::effective_props()`** falls back to the listing's `model:`/`product:`
+  when `getprop` was silent, so an unauthorized phone still gets a sensible name
+  hint (and the same name the manifest default would choose).
+- **`Db` implements `DeviceSink`** in `database::devices`; a failed write is
+  logged, not propagated — a full disk must not take down device detection.
 
 Wave 4 — Profiles, locations, folders
 - [x] E04.1 Display names & rename
