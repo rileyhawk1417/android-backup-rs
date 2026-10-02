@@ -616,6 +616,45 @@ fn modal_window(ctx: &egui::Context, app: &App, modal: &Modal, intents: &mut Vec
                     ui.add_space(8.0);
                     adb_actions(ui, app, intents);
                 }
+                Modal::AdbInstalling {
+                    stage,
+                    detail,
+                    fraction,
+                } => {
+                    ui.label(stage);
+                    ui.add_space(6.0);
+                    // A bar when the total is known, a spinner when it is not:
+                    // a bar with no fraction would sit at zero and look stalled.
+                    match fraction {
+                        Some(value) => {
+                            ui.add(
+                                egui::ProgressBar::new(*value)
+                                    .show_percentage()
+                                    .desired_width(320.0),
+                            );
+                        }
+                        None => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.colored_label(muted(ui), "working…");
+                            });
+                        }
+                    }
+                    if !detail.is_empty() {
+                        ui.add_space(4.0);
+                        ui.colored_label(muted(ui), detail);
+                    }
+                    ui.add_space(8.0);
+                    ui.label(
+                        "platform-tools goes into this app's data directory. \
+                         Your existing adb, if any, is left alone until the \
+                         download has been verified.",
+                    );
+                    ui.add_space(8.0);
+                    if ui.button("Cancel").clicked() {
+                        intents.push(Intent::CancelAdbInstall);
+                    }
+                }
                 Modal::ServerConflict { message } => {
                     ui.colored_label(bad(ui), message);
                     ui.add_space(6.0);
@@ -653,7 +692,7 @@ fn adb_actions(ui: &mut Ui, app: &App, intents: &mut Vec<Intent>) {
     ui.horizontal_wrapped(|ui| {
         ui.add_enabled_ui(available, |ui| {
             if ui.button("Install automatically").clicked() {
-                // Wave 7. The button is deliberately disabled until it is real.
+                intents.push(Intent::InstallAdb);
             }
         });
         if ui.button("Choose adb…").clicked() {

@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use android_backup_core::adb::installer::{Progress as InstallProgress, Stage as InstallStage};
 use android_backup_core::backup::controller::{JobPhase, StartError};
 use android_backup_core::backup::{JobEvent, JobOutcome, PauseReason, Progress};
 use android_backup_core::database::devices::DeviceRow;
@@ -498,17 +499,27 @@ pub struct Banner {
 pub enum ModalKind {
     Welcome,
     AdbMissing,
+    AdbInstalling,
     ServerConflict,
     Error,
 }
 
 /// A modal dialog. Content is data; [`crate::ui`] renders and resolves it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Modal {
     /// First launch: pick a backup location before anything else.
     Welcome { suggested_dir: String },
     /// `adb` could not be located.
     AdbMissing { message: String },
+    /// platform-tools is being downloaded and installed (E07.1).
+    ///
+    /// `fraction` is `None` while the size is unknown, which is why the renderer
+    /// falls back to a spinner rather than inventing a percentage.
+    AdbInstalling {
+        stage: String,
+        detail: String,
+        fraction: Option<f32>,
+    },
     /// `adb` reported a server problem (version mismatch, dead socket).
     ServerConflict { message: String },
     /// Anything else that needs the user's attention.
@@ -520,6 +531,7 @@ impl Modal {
         match self {
             Self::Welcome { .. } => ModalKind::Welcome,
             Self::AdbMissing { .. } => ModalKind::AdbMissing,
+            Self::AdbInstalling { .. } => ModalKind::AdbInstalling,
             Self::ServerConflict { .. } => ModalKind::ServerConflict,
             Self::Error { .. } => ModalKind::Error,
         }
@@ -529,8 +541,31 @@ impl Modal {
         match self {
             Self::Welcome { .. } => "Welcome",
             Self::AdbMissing { .. } => "ADB not found",
+            Self::AdbInstalling { .. } => "Installing adb",
             Self::ServerConflict { .. } => "ADB server problem",
             Self::Error { title, .. } => title,
+        }
+    }
+
+    /// The progress dialog for a managed adb installation (E07.1).
+    ///
+    /// Byte counts are only shown while downloading: the other stages have no
+    /// meaningful total of their own, and a bar that sits at 100% during a slow
+    /// extraction reads as "stuck".
+    pub fn installing(progress: &InstallProgress) -> Self {
+        let detail = match (progress.stage, progress.total) {
+            (InstallStage::Download, Some(total)) => {
+                format!("{} of {}", format_bytes(progress.done), format_bytes(total))
+            }
+            (InstallStage::Download, None) => {
+                format!("{} downloaded", format_bytes(progress.done))
+            }
+            _ => String::new(),
+        };
+        Self::AdbInstalling {
+            stage: progress.stage.describe().to_string(),
+            detail,
+            fraction: progress.fraction(),
         }
     }
 }
@@ -869,6 +904,15 @@ impl ViewState {
         if let Some(modal) = self.modal.take() {
             self.dismissed.insert(modal.kind());
         }
+    }
+
+    /// Put a modal on screen regardless of what was dismissed before.
+    ///
+    /// For modals the user just asked for: a progress dialog, an error from an
+    /// action they took. [`Self::show_modal`] is for modals the *condition* asks
+    /// for (no adb, no location picked), where nagging is the failure mode.
+    pub fn set_modal(&mut self, modal: Modal) {
+        self.modal = Some(modal);
     }
 
     pub fn has_modal(&self) -> bool {
@@ -1263,6 +1307,75 @@ mod tests {
         assert!(!view.modal_allowed(ModalKind::Welcome));
         // A different modal is unaffected.
         assert!(view.modal_allowed(ModalKind::AdbMissing));
+    }
+
+    #[test]
+    fn a_progress_dialog_reports_the_stage_the_bytes_and_the_fraction() {
+        let downloading = Modal::installing(&InstallProgress {
+            stage: InstallStage::Download,
+            done: 2048,
+            total: Some(8192),
+        });
+        assert_eq!(downloading.title(), "Installing adb");
+        match downloading {
+            Modal::AdbInstalling {
+                stage,
+                detail,
+                fraction,
+            } => {
+                assert_eq!(stage, "Downloading platform-tools");
+                assert_eq!(detail, "2.0 KB of 8.0 KB");
+                assert_eq!(fraction, Some(0.25));
+            }
+            other => panic!("expected the install modal, got {other:?}"),
+        }
+
+        // No announced length: bytes downloaded, nothing invented.
+        let unknown = Modal::installing(&InstallProgress {
+            stage: InstallStage::Download,
+            done: 2048,
+            total: None,
+        });
+        match unknown {
+            Modal::AdbInstalling {
+                detail, fraction, ..
+            } => {
+                assert_eq!(detail, "2.0 KB downloaded");
+                assert_eq!(fraction, None, "a bar would sit at zero and look stuck");
+            }
+            other => panic!("expected the install modal, got {other:?}"),
+        }
+
+        // Extraction has no total of its own: the stage alone is shown.
+        let extracting = Modal::installing(&InstallProgress {
+            stage: InstallStage::Extract,
+            done: 0,
+            total: None,
+        });
+        match extracting {
+            Modal::AdbInstalling { detail, .. } => assert!(detail.is_empty()),
+            other => panic!("expected the install modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_install_modal_is_shown_even_after_its_kind_was_dismissed() {
+        let mut view = ViewState::new("");
+        let installing = Modal::installing(&InstallProgress {
+            stage: InstallStage::Manifest,
+            done: 0,
+            total: None,
+        });
+        view.show_modal(installing.clone());
+        view.dismiss_modal();
+
+        // The user just asked for this: it must come back. `show_modal` is for
+        // the conditions that nag (no adb, no location); `set_modal` is not.
+        view.show_modal(installing.clone());
+        assert!(!view.has_modal());
+        view.set_modal(installing);
+        assert!(view.has_modal());
+        assert_eq!(view.modal().map(Modal::title), Some("Installing adb"));
     }
 
     #[test]

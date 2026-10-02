@@ -18,6 +18,7 @@ use android_backup_core::backup::RemoteFiles;
 use android_backup_core::config::AppConfig;
 use android_backup_core::database::open_or_quarantine;
 use android_backup_desktop::app::AppDeps;
+use android_backup_desktop::startup::{AdbInstaller, ManagedInstaller};
 use android_backup_desktop::window;
 
 fn main() {
@@ -96,6 +97,19 @@ fn run(paths: android_backup_core::config::AppPaths) -> Result<(), String> {
     db.migrate()
         .map_err(|err| format!("could not prepare the backup manifest: {err}"))?;
 
+    // Managed platform-tools (E07.1). Unavailable is a supported state: the modal
+    // then only offers the routes that need an adb the user already has.
+    let installer = match ManagedInstaller::new(&paths) {
+        Ok(installer) => {
+            tracing::info!(dest = %installer.destination().display(), "managed adb install available");
+            Some(Arc::new(installer) as Arc<dyn AdbInstaller>)
+        }
+        Err(err) => {
+            tracing::warn!(%err, "managed adb install unavailable");
+            None
+        }
+    };
+
     let deps = AppDeps {
         paths,
         cfg,
@@ -105,6 +119,7 @@ fn run(paths: android_backup_core::config::AppPaths) -> Result<(), String> {
         remote,
         db: Some(db),
         probe: Some(probe),
+        installer,
         watch_devices: true,
     };
 

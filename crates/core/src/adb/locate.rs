@@ -117,7 +117,10 @@ pub fn parse_version(output: &str) -> Result<AdbVersion, AdbLocateError> {
 }
 
 /// Function used to prove a candidate binary works. Injectable for tests.
-pub type VersionProbe<'a> = dyn Fn(&Path) -> Result<AdbVersion, AdbLocateError> + 'a;
+///
+/// `Send + Sync` because the managed installer (E07.1) carries one and runs on a
+/// worker thread; a probe is a pure function of a path, so this costs nothing.
+pub type VersionProbe<'a> = dyn Fn(&Path) -> Result<AdbVersion, AdbLocateError> + Send + Sync + 'a;
 
 /// Find adb using the given probe.
 pub fn find_adb_with(

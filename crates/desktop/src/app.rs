@@ -8,10 +8,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use android_backup_core::adb::installer::{
+    Control as InstallControl, InstallError, InstallReport, Progress as InstallProgress,
+    Stage as InstallStage,
+};
 use android_backup_core::adb::locate::{AdbFound, AdbLocateError};
 use android_backup_core::adb::runner::Adb;
 use android_backup_core::backup::controller::{BackupController, JobHandle};
@@ -29,7 +34,7 @@ use android_backup_core::devices::profile::ProfileService;
 use android_backup_core::devices::watcher::{DeviceWatcher, WatcherConfig};
 use android_backup_core::devices::{DeviceInfo, DeviceSink, SharedSink};
 
-use crate::startup;
+use crate::startup::{self, AdbInstaller};
 use crate::view::{Banner, JobView, Modal, StartBlock, ViewState, HISTORY_PAGE};
 
 /// Rows of a job's file list loaded per "load more" click.
@@ -50,6 +55,9 @@ pub struct AppDeps {
     pub db: Option<Arc<Db>>,
     /// Filesystem probe used for destination validation and recovery.
     pub probe: Option<Arc<dyn FsProbe>>,
+    /// Managed platform-tools installer. `None` disables the button, and the UI
+    /// says why rather than offering a dead end.
+    pub installer: Option<Arc<dyn AdbInstaller>>,
     /// Start the device watcher. Tests turn this off when they drive events by
     /// hand; everything else goes through the real thread.
     pub watch_devices: bool,
@@ -67,6 +75,7 @@ impl AppDeps {
             remote: None,
             db: None,
             probe: Some(Arc::new(LocalFsProbe::new())),
+            installer: None,
             watch_devices: true,
         }
     }
@@ -78,8 +87,12 @@ enum UiMessage {
     FolderPicked(PathBuf),
     /// An adb executable chosen by the user.
     AdbPicked(PathBuf),
-    /// A background re-locate attempt finished.
+    /// A background adb locate attempt finished.
     AdbLocated(Result<AdbFound, AdbLocateError>),
+    /// The installer is still working.
+    AdbInstallProgress(InstallProgress),
+    /// The installer finished, one way or the other.
+    AdbInstalled(Result<InstallReport, InstallError>),
     /// Startup recovery finished for one device.
     Recovered {
         device_id: i64,
@@ -126,6 +139,15 @@ pub struct App {
     watcher: Option<DeviceWatcher>,
     adb: Option<Arc<dyn Adb>>,
     adb_found: Option<AdbFound>,
+    /// Managed installer (E07.1); `None` when the platform cannot install or the
+    /// HTTP client could not be built.
+    installer: Option<Arc<dyn AdbInstaller>>,
+    /// An installation is in flight: the progress modal is up and a second
+    /// request must not start another download.
+    installing: bool,
+    /// Set by the Cancel button, read by the installer thread's progress
+    /// callback on the next tick.
+    install_cancelled: Arc<AtomicBool>,
     /// Shared with the watcher's sink so it can wake the UI.
     ctx_slot: Arc<Mutex<Option<egui::Context>>>,
 
@@ -173,6 +195,7 @@ impl App {
             remote,
             db,
             probe,
+            installer,
             watch_devices,
         } = deps;
         let probe: Arc<dyn FsProbe> = probe.unwrap_or_else(|| Arc::new(LocalFsProbe::new()));
@@ -235,6 +258,9 @@ impl App {
             watcher,
             adb,
             adb_found,
+            installer,
+            installing: false,
+            install_cancelled: Arc::new(AtomicBool::new(false)),
             ctx_slot,
             view,
             handles: HashMap::new(),
@@ -496,6 +522,8 @@ impl App {
             UiMessage::FolderPicked(path) => self.on_folder_picked(path),
             UiMessage::AdbPicked(path) => self.on_adb_picked(path),
             UiMessage::AdbLocated(result) => self.on_adb_located(result),
+            UiMessage::AdbInstallProgress(progress) => self.on_install_progress(progress),
+            UiMessage::AdbInstalled(result) => self.on_installed(result),
             UiMessage::Recovered { device_id, report } => {
                 self.on_recovered(device_id, report);
             }
@@ -1191,17 +1219,133 @@ impl App {
         self.view.dismiss_modal();
     }
 
-    /// "Install automatically" is Wave 7. Say so, rather than offering a button
-    /// that silently does nothing.
-    fn install_adb_is_available(&self) -> bool {
-        false
+    // ---------------------------------------------------------------------
+    // Intents: managed adb installation (E07.1)
+    // ---------------------------------------------------------------------
+
+    /// "Install automatically": download platform-tools on a worker thread.
+    ///
+    /// Everything that takes time or can fail — the manifest fetch, 9 MB of
+    /// archive, the checksum, the extraction, `adb version` — happens off the UI
+    /// thread, and the only thing this method does is put a progress modal up.
+    fn install_adb(&mut self) {
+        if self.installing {
+            tracing::debug!("an installation is already running");
+            return;
+        }
+        let Some(installer) = self.installer.clone() else {
+            // Unreachable from the UI (the button is disabled), but a silent
+            // no-op here would be a bug nobody notices.
+            tracing::warn!("asked to install adb with no installer configured");
+            return;
+        };
+
+        self.installing = true;
+        self.install_cancelled.store(false, Ordering::SeqCst);
+        self.view.set_modal(Modal::installing(&InstallProgress {
+            stage: InstallStage::Manifest,
+            done: 0,
+            total: None,
+        }));
+
+        let tx = self.tx.clone();
+        let ctx_slot = Arc::clone(&self.ctx_slot);
+        let cancelled = Arc::clone(&self.install_cancelled);
+        let spawn = std::thread::Builder::new()
+            .name("install-adb".to_string())
+            .spawn(move || {
+                let mut on_progress = |progress: InstallProgress| {
+                    // Wake the UI. It only drains messages while it is drawing,
+                    // and a download takes minutes on a slow link.
+                    if let Some(ctx) = lock(&ctx_slot).as_ref() {
+                        ctx.request_repaint();
+                    }
+                    if tx.send(UiMessage::AdbInstallProgress(progress)).is_err() {
+                        return InstallControl::Cancel;
+                    }
+                    if cancelled.load(Ordering::SeqCst) {
+                        InstallControl::Cancel
+                    } else {
+                        InstallControl::Continue
+                    }
+                };
+                let result = installer.install(&mut on_progress);
+                if tx.send(UiMessage::AdbInstalled(result)).is_err() {
+                    tracing::debug!("install result dropped: the UI is gone");
+                }
+            });
+        if let Err(err) = spawn {
+            self.installing = false;
+            self.view
+                .set_error(format!("could not start the installer thread: {err}"));
+        }
     }
 
-    fn install_adb_note(&self) -> &'static str {
-        "Downloading platform-tools automatically arrives in a later build. \
-         Until then, point the app at an existing adb."
+    /// A progress tick: redraw the modal.
+    fn on_install_progress(&mut self, progress: InstallProgress) {
+        if self.installing {
+            self.view.set_modal(Modal::installing(&progress));
+        }
+    }
+
+    /// The Cancel button. The installer notices on its next progress tick and
+    /// takes its staging directory with it.
+    fn cancel_adb_install(&mut self) {
+        if self.installing {
+            tracing::info!("adb install cancelled by the user");
+            self.install_cancelled.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The installation thread finished.
+    fn on_installed(&mut self, result: Result<InstallReport, InstallError>) {
+        self.installing = false;
+        match result {
+            Ok(report) => {
+                tracing::info!(
+                    path = %report.adb_path.display(),
+                    version = %report.version,
+                    revision = %report.revision,
+                    "platform-tools installed"
+                );
+                // Point the configuration at what we installed, then probe it
+                // like any other candidate: the installation is only "done"
+                // once the binary answers `adb version`.
+                report.apply_to(&mut self.cfg);
+                if let Err(message) = startup::save_config(&self.cfg, &self.paths) {
+                    self.view.set_error(message);
+                }
+                self.view.set_banner(Some(Banner {
+                    message: startup::installed_note(&report),
+                    blocking: false,
+                }));
+                self.relocate_adb();
+            }
+            Err(InstallError::Cancelled) => {
+                tracing::info!("adb install cancelled");
+                self.view.dismiss_modal();
+                self.view.set_banner(Some(Banner {
+                    message: "Installation cancelled — nothing was changed.".to_string(),
+                    blocking: false,
+                }));
+            }
+            Err(err) => {
+                tracing::warn!(%err, "automatic adb installation failed");
+                // Back to the modal the user came from, with the reason and the
+                // two ways out (choose a binary, search PATH again).
+                self.view.set_modal(Modal::AdbMissing {
+                    message: startup::install_failed_message(&err),
+                });
+            }
+        }
     }
 }
+
+/// Why the install button is disabled: no installer was configured at startup
+/// (an unsupported platform, or the HTTP client could not be built).
+const INSTALL_UNAVAILABLE: &str =
+    "Automatic installation is unavailable in this build — it cannot \
+     download platform-tools. Point the app at an existing adb instead.";
 
 /// Run a native picker on its own thread and deliver the result as a message.
 ///
@@ -1254,6 +1398,8 @@ pub enum Intent {
     UseSystemAdb,
     ChooseAdbBinary,
     RetryAdb,
+    InstallAdb,
+    CancelAdbInstall,
     DismissBanner,
 }
 
@@ -1282,13 +1428,15 @@ impl App {
             Intent::UseSystemAdb => self.use_system_adb(),
             Intent::ChooseAdbBinary => self.pick_adb_async(),
             Intent::RetryAdb => self.relocate_adb(),
+            Intent::InstallAdb => self.install_adb(),
+            Intent::CancelAdbInstall => self.cancel_adb_install(),
             Intent::DismissBanner => self.view.clear_banner(),
         }
     }
 
     /// Public accessors the renderer needs that are not worth an intent.
     pub fn install_adb_button(&self) -> (bool, &'static str) {
-        (self.install_adb_is_available(), self.install_adb_note())
+        (self.installer.is_some(), INSTALL_UNAVAILABLE)
     }
 
     pub fn can_start(&self) -> bool {
@@ -1379,6 +1527,7 @@ mod tests {
     use android_backup_core::adb::locate::AdbSource;
     use android_backup_core::adb::props::DeviceProps;
     use android_backup_core::backup::enumerate::RemoteFiles;
+    use android_backup_core::config::AdbMode;
     use android_backup_core::database::jobs::{JobCounters, JobStatus};
     use android_backup_core::devices::watcher::DeviceEvent;
     use android_backup_core::mock::{MockAdb, MockRemote};
@@ -1428,6 +1577,7 @@ mod tests {
             remote: Some(remote),
             db: Some(db),
             probe: Some(Arc::new(LocalFsProbe::new())),
+            installer: None,
             watch_devices: false,
         })
     }
@@ -1459,6 +1609,7 @@ mod tests {
             remote: Some(Arc::new(MockRemote::new())),
             db: Some(db),
             probe: Some(Arc::new(LocalFsProbe::new())),
+            installer: None,
             watch_devices: false,
         })
     }
@@ -1752,5 +1903,165 @@ mod tests {
     fn destination_text_handles_both_cases() {
         assert_eq!(destination_text(None), "(not set)");
         assert_eq!(destination_text(Some(Path::new("/mnt/x"))), "/mnt/x");
+    }
+
+    // -----------------------------------------------------------------
+    // Managed installation (E07.1)
+    // -----------------------------------------------------------------
+
+    /// An app with no adb and a scripted installer, plus the receiver that says
+    /// when the installer thread has finished.
+    fn app_with_installer(
+        dir: &Path,
+        script: crate::testutil::ScriptedInstaller,
+    ) -> (App, std::sync::mpsc::Receiver<()>) {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let mut deps = AppDeps::new(
+            AppPaths::with_root(&dir.join("cfg"), &dir.join("data")),
+            AppConfig::default(),
+        );
+        deps.watch_devices = false;
+        deps.installer = Some(crate::testutil::installer(script.announcing(done_tx)));
+        (App::new(deps), done_rx)
+    }
+
+    /// Wait (bounded) for the installer thread to report, then fold the message.
+    fn wait_for_install(app: &mut App, done: &std::sync::mpsc::Receiver<()>) {
+        done.recv_timeout(Duration::from_secs(5))
+            .expect("the installer thread finished");
+        app.drain_events();
+    }
+
+    #[test]
+    fn installing_adb_points_the_config_at_the_managed_binary() {
+        let dir = temp();
+        let (mut app, done) =
+            app_with_installer(dir.path(), crate::testutil::ScriptedInstaller::succeeding());
+        assert!(app.install_adb_button().0, "an installer is configured");
+
+        app.handle(Intent::InstallAdb);
+        // The modal goes up synchronously, before a single byte is fetched.
+        assert!(matches!(
+            app.view().modal(),
+            Some(Modal::AdbInstalling { .. })
+        ));
+        wait_for_install(&mut app, &done);
+
+        let report = crate::testutil::sample_report();
+        assert_eq!(app.config().adb_mode, AdbMode::Managed);
+        assert_eq!(app.config().managed_adb_dir.as_deref(), Some(&*report.dir));
+        // The choice is persisted, so the next launch finds the managed adb.
+        let saved = AppConfig::load(&app.paths().config_file);
+        assert_eq!(saved.adb_mode, AdbMode::Managed);
+        assert_eq!(saved.managed_adb_dir, Some(report.dir.clone()));
+        // And the user is told what happened, with the version that was verified.
+        let banner = app.view().banner().expect("a banner").message.clone();
+        assert!(banner.contains("1.0.41"), "{banner}");
+        // The modal stays up until the *new* binary answers `adb version`: the
+        // install is not done when the bytes land, but when adb runs.
+        assert!(matches!(
+            app.view().modal(),
+            Some(Modal::AdbInstalling { .. })
+        ));
+    }
+
+    #[test]
+    fn a_failed_install_explains_itself_and_keeps_every_route_out_open() {
+        let dir = temp();
+        let (mut app, done) = app_with_installer(
+            dir.path(),
+            crate::testutil::ScriptedInstaller::failing(crate::testutil::digest_mismatch()),
+        );
+        let before = app.config().clone();
+
+        app.handle(Intent::InstallAdb);
+        wait_for_install(&mut app, &done);
+
+        match app.view().modal() {
+            Some(Modal::AdbMissing { message }) => {
+                assert!(message.contains("sha256"), "{message}");
+                assert!(message.contains("Choose adb"), "{message}");
+            }
+            other => panic!("expected the adb modal back, got {other:?}"),
+        }
+        // Nothing is switched over on a failure, and nothing is written.
+        assert_eq!(app.config().adb_mode, before.adb_mode);
+        assert!(!app.paths().config_file.exists());
+    }
+
+    #[test]
+    fn cancelling_an_install_says_nothing_was_changed() {
+        let dir = temp();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let installer = Arc::new(
+            crate::testutil::ScriptedInstaller::succeeding()
+                .gated(gate)
+                .announcing(done_tx),
+        );
+        let mut deps = AppDeps::new(
+            AppPaths::with_root(&dir.path().join("cfg"), &dir.path().join("data")),
+            AppConfig::default(),
+        );
+        deps.watch_devices = false;
+        deps.installer = Some(Arc::clone(&installer) as Arc<dyn AdbInstaller>);
+        let mut app = App::new(deps);
+
+        app.handle(Intent::InstallAdb);
+        app.handle(Intent::CancelAdbInstall);
+        // The gate is the download; the installer only notices on the tick after
+        // it, which is exactly the behaviour being tested.
+        let _ = release.send(());
+        wait_for_install(&mut app, &done_rx);
+
+        assert!(installer.was_cancelled(), "the installer was told to stop");
+        let banner = app.view().banner().expect("a banner").message.clone();
+        assert!(banner.contains("cancelled"), "{banner}");
+        assert!(app.view().modal().is_none(), "the modal is gone");
+        // A cancel changes nothing: no managed directory claimed, no config file
+        // written, so the next launch starts where this one did.
+        assert!(app.config().managed_adb_dir.is_none());
+        assert!(!app.paths().config_file.exists());
+    }
+
+    #[test]
+    fn a_second_install_request_while_one_is_running_is_ignored() {
+        let dir = temp();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let installer = Arc::new(
+            crate::testutil::ScriptedInstaller::succeeding()
+                .gated(gate)
+                .announcing(done_tx),
+        );
+        let mut deps = AppDeps::new(
+            AppPaths::with_root(&dir.path().join("cfg"), &dir.path().join("data")),
+            AppConfig::default(),
+        );
+        deps.watch_devices = false;
+        deps.installer = Some(Arc::clone(&installer) as Arc<dyn AdbInstaller>);
+        let mut app = App::new(deps);
+
+        app.handle(Intent::InstallAdb);
+        // The same click again, mid-download.
+        app.handle(Intent::InstallAdb);
+        let _ = release.send(());
+        wait_for_install(&mut app, &done_rx);
+
+        assert_eq!(installer.installs(), 1, "one download, not two");
+    }
+
+    #[test]
+    fn the_install_button_says_why_when_there_is_no_installer() {
+        let dir = temp();
+        let app = app(dir.path());
+        let (available, note) = app.install_adb_button();
+        assert!(!available);
+        assert!(note.contains("unavailable"), "{note}");
+
+        // Clicking anyway must not panic or put a stray modal up.
+        let mut app = app;
+        app.handle(Intent::InstallAdb);
+        assert!(app.view().modal().is_none());
     }
 }

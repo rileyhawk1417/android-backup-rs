@@ -47,6 +47,7 @@ fn app(dir: &Path) -> (App, Arc<Db>) {
         remote: Some(remote as Arc<dyn RemoteFiles>),
         db: Some(Arc::clone(&db)),
         probe: None::<Arc<dyn FsProbe>>,
+        installer: None,
         watch_devices: false,
     });
     (app, db)
@@ -106,6 +107,25 @@ fn collect_shape(shape: &egui::epaint::Shape, out: &mut String) {
             }
         }
         _ => {}
+    }
+}
+
+/// Render until the text contains `needle`, or fail after five seconds.
+///
+/// Progress arrives from the installer thread through the app's message queue,
+/// which is only drained while a frame is drawn, so the loop *is* the pump.
+fn wait_for_text(app: &mut App, needle: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let text = frame_text(app);
+        if text.contains(needle) {
+            return text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never rendered {needle:?}; last frame was:\n{text}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
@@ -326,8 +346,48 @@ fn a_missing_adb_is_reported_in_a_modal_with_every_route_out() {
     assert!(text.contains("Choose adb"), "{text}");
     assert!(text.contains("Use the system adb"), "{text}");
     assert!(text.contains("Install automatically"), "{text}");
-    // Wave 7 has not landed, so the honest note must be shown.
-    assert!(text.contains("later build"), "{text}");
+    // Without an installer (this build), the button is disabled and says why.
+    assert!(text.contains("unavailable in this build"), "{text}");
+}
+
+#[test]
+fn a_configured_installer_offers_a_working_button_with_no_excuse_note() {
+    let dir = temp();
+    let mut deps = AppDeps::new(
+        AppPaths::with_root(&dir.path().join("cfg"), &dir.path().join("data")),
+        AppConfig::default(),
+    );
+    deps.watch_devices = false;
+    deps.installer = Some(android_backup_desktop::testutil::installer(
+        android_backup_desktop::testutil::ScriptedInstaller::succeeding(),
+    ));
+    let mut app = App::new(deps);
+    let text = frame_text(&mut app);
+    assert!(text.contains("Install automatically"), "{text}");
+    assert!(!text.contains("unavailable in this build"), "{text}");
+}
+
+#[test]
+fn the_install_progress_modal_shows_the_stage_the_bytes_and_a_cancel() {
+    let dir = temp();
+    let mut deps = AppDeps::new(
+        AppPaths::with_root(&dir.path().join("cfg"), &dir.path().join("data")),
+        AppConfig::default(),
+    );
+    deps.watch_devices = false;
+    // A gated installer: the install starts and stays in flight, so the modal is
+    // on screen while the test looks at it.
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    deps.installer = Some(android_backup_desktop::testutil::installer(
+        android_backup_desktop::testutil::ScriptedInstaller::succeeding().gated(gate),
+    ));
+    let mut app = App::new(deps);
+    app.handle(Intent::InstallAdb);
+    let text = wait_for_text(&mut app, "1.0 KB of 4.0 KB");
+    assert!(text.contains("Installing adb"), "{text}");
+    assert!(text.contains("Downloading platform-tools"), "{text}");
+    assert!(text.contains("Cancel"), "{text}");
+    let _ = release.send(());
 }
 
 #[test]

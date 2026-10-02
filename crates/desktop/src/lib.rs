@@ -10,12 +10,15 @@
 //! * [`app`] — application state and the intent handlers behind the widgets.
 //! * [`ui`] — the `egui` rendering of [`app::App`].
 //! * [`window`] — the `eframe` entry point (the only `eframe` in this crate).
+//! * [`testutil`] — scripted doubles for the installer seam (tests only, but
+//!   compiled unconditionally so the integration tests can reach them).
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod app;
 pub mod logging;
 pub mod startup;
+pub mod testutil;
 pub mod ui;
 pub mod view;
 pub mod window;

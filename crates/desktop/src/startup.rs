@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use android_backup_core::adb::installer::{
+    Control as InstallControl, HostOs, InstallError, InstallReport, Installer,
+    Progress as InstallProgress,
+};
 use android_backup_core::adb::locate::{self, AdbFound, AdbLocateError, AdbVersion};
 use android_backup_core::adb::runner::{Adb, ProcessAdbRunner};
 use android_backup_core::adb::AdbError;
@@ -130,6 +134,88 @@ pub fn server_conflict(adb: &dyn Adb) -> Option<String> {
 /// Probe the adb version, for the status bar. Failures are not fatal.
 pub fn probe_version(adb: &dyn Adb) -> Option<AdbVersion> {
     locate::probe_version(adb).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Managed installation (E07.1)
+// ---------------------------------------------------------------------------
+
+/// Installing platform-tools, as the UI uses it.
+///
+/// A trait rather than a concrete type for one reason: the UI has to be able to
+/// show progress, success and *failure* — a checksum mismatch, a full disk, no
+/// network — and none of those can be provoked against Google's servers in a
+/// test. The real implementation is [`ManagedInstaller`].
+///
+/// Implementations must be safe to call from the installer thread: the call
+/// blocks for as long as the download takes, and must never run on the UI thread.
+pub trait AdbInstaller: Send + Sync {
+    /// Download, verify and install adb, reporting progress as it goes.
+    ///
+    /// Returning [`InstallControl::Cancel`] from the callback asks the installer
+    /// to stop; it then answers [`InstallError::Cancelled`] and leaves the
+    /// previous installation untouched.
+    fn install(
+        &self,
+        on_progress: &mut dyn FnMut(InstallProgress) -> InstallControl,
+    ) -> Result<InstallReport, InstallError>;
+}
+
+/// The production installer: Google's manifest, HTTPS, the app's data directory.
+pub struct ManagedInstaller {
+    dest: PathBuf,
+    inner: Installer,
+}
+
+impl ManagedInstaller {
+    /// Build the installer for these application paths.
+    ///
+    /// Fails only when the HTTP client cannot be built at all — no network is
+    /// touched here.
+    pub fn new(paths: &AppPaths) -> Result<Self, InstallError> {
+        Ok(Self {
+            dest: paths.managed_adb_dir.clone(),
+            inner: Installer::http()?,
+        })
+    }
+
+    /// Where the installation goes (`<data>/platform-tools`).
+    pub fn destination(&self) -> &Path {
+        &self.dest
+    }
+}
+
+impl AdbInstaller for ManagedInstaller {
+    fn install(
+        &self,
+        on_progress: &mut dyn FnMut(InstallProgress) -> InstallControl,
+    ) -> Result<InstallReport, InstallError> {
+        let os = HostOs::current()?;
+        self.inner.install(&self.dest, os, on_progress)
+    }
+}
+
+/// One line about a finished installation, for the log and the status bar.
+pub fn installed_note(report: &InstallReport) -> String {
+    format!(
+        "Installed adb {} (platform-tools {}) at {}",
+        report.version,
+        report.revision,
+        report.adb_path.display()
+    )
+}
+
+/// What to say when automatic installation did not work.
+///
+/// The two ways out are named explicitly: the failure is a dead end only if the
+/// user is not told that an existing adb still works.
+pub fn install_failed_message(err: &InstallError) -> String {
+    format!(
+        "Installing platform-tools automatically did not work:\n\n{err}\n\n\
+         Nothing was changed on your system — the previous adb, if any, is still \
+         in place. You can still pick an existing adb below (\"Choose adb…\"), \
+         or search PATH again."
+    )
 }
 
 /// Whether a configuration file exists yet (first launch detection).
@@ -284,5 +370,35 @@ mod tests {
             suggested_backup_dir(&AppConfig::default()),
             android_backup_core::config::default_backup_dir().expect("home dir")
         );
+    }
+
+    #[test]
+    fn the_managed_installer_targets_the_app_data_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::with_root(&dir.path().join("cfg"), &dir.path().join("data"));
+        // Building the installer must not touch the network: only `install` does.
+        let installer = ManagedInstaller::new(&paths).expect("http client");
+        assert_eq!(installer.destination(), paths.managed_adb_dir);
+        assert!(paths.managed_adb_dir.starts_with(&paths.data_dir));
+    }
+
+    #[test]
+    fn a_finished_install_is_summarised_with_its_version_and_path() {
+        let report = crate::testutil::sample_report();
+        let note = installed_note(&report);
+        assert!(note.contains("1.0.41"), "{note}");
+        assert!(note.contains("37.0.1"), "{note}");
+        assert!(note.contains(crate::testutil::SAMPLE_ADB_DIR), "{note}");
+    }
+
+    #[test]
+    fn a_failed_install_names_the_cause_and_the_ways_out() {
+        let err = crate::testutil::digest_mismatch();
+        let message = install_failed_message(&err);
+        assert!(message.contains("sha256"), "{message}");
+        assert!(message.contains("did not work"), "{message}");
+        // The important half: the user is not left at a dead end.
+        assert!(message.contains("Choose adb"), "{message}");
+        assert!(message.contains("still in place"), "{message}");
     }
 }
