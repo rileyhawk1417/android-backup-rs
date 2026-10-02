@@ -252,6 +252,13 @@ pub trait ControlSource: Send + Sync {
 
     /// Block until the job may run again, the timeout elapses, or it is cancelled.
     fn wait_for_running(&self, timeout: Duration) -> ControlSignal;
+
+    /// Pause the run because the *engine* found something the user has to fix
+    /// (a missing cable, a revoked authorization, a full disk).
+    ///
+    /// Non-interactive runs leave this as a no-op: there is nobody to press
+    /// Resume, so they carry on and fail the file instead of waiting forever.
+    fn request_pause(&self) {}
 }
 
 /// Shared pause/cancel flags.
@@ -294,6 +301,10 @@ impl RunControl {
 }
 
 impl ControlSource for RunControl {
+    fn request_pause(&self) {
+        self.pause();
+    }
+
     fn signal(&self) -> ControlSignal {
         if self.is_cancelled() {
             ControlSignal::Cancelled
@@ -932,19 +943,34 @@ impl<'a> Engine<'a> {
                 .pull(&config.serial, remote_path, &staged.staging_path)
             {
                 Ok(()) => return PullOutcome::Ok,
-                Err(err) if err.is_transient() && attempt < MAX_TRANSIENT_RETRIES => {
-                    attempt += 1;
+                Err(err) if err.is_transient() => {
                     let reason = if err.needs_authorization() {
                         PauseReason::AuthorizationNeeded
                     } else {
                         PauseReason::DeviceDisconnected
                     };
+                    // A short burst of retries costs nothing and hides a blip
+                    // (adb hiccup, phone waking up) from the user entirely.
+                    if attempt < MAX_TRANSIENT_RETRIES {
+                        attempt += 1;
+                        tracing::warn!(
+                            path = remote_path,
+                            attempt,
+                            error = %err,
+                            "transfer interrupted; retrying"
+                        );
+                        continue;
+                    }
+                    // Still gone after that: stop burning the file. Pause, say
+                    // why, and let a reconnect plus Resume finish the job — the
+                    // manifest keeps the previous version verified in the
+                    // meantime.
                     tracing::warn!(
                         path = remote_path,
-                        attempt,
                         error = %err,
-                        "transfer interrupted; waiting for the device"
+                        "device still unavailable; pausing instead of failing the file"
                     );
+                    control.request_pause();
                     match self.await_running(
                         state.job_id,
                         sink,
@@ -952,7 +978,10 @@ impl<'a> Engine<'a> {
                         reason,
                         Some(remote_path.to_string()),
                     ) {
-                        WaitOutcome::Running => continue,
+                        WaitOutcome::Running => {
+                            attempt = 0;
+                            continue;
+                        }
                         WaitOutcome::Cancelled => return PullOutcome::Cancelled,
                     }
                 }
@@ -981,6 +1010,7 @@ impl<'a> Engine<'a> {
         }
         // Not enough room: pause and let the user free some, then re-check once.
         tracing::warn!("destination is running out of space; pausing");
+        control.request_pause();
         match self.await_running(state.job_id, sink, control, PauseReason::LowSpace, None) {
             WaitOutcome::Cancelled => {
                 state.cancelled = true;
