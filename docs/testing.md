@@ -69,7 +69,29 @@ this environment has a display or a phone, so the mock-driven rows are covered b
 | 2 | Device list, detail panel, progress, history and modals render | **PASS (headless `egui`)** | `ui_headless.rs` |
 | 3 | Start button gating (unauthorized, no profile, running job, no controller) | **PASS** | `ui_headless.rs`, `view.rs` tests |
 
-### 2.2 Linux + real phone
+### 2.2 Window under a virtual display (attempted, inconclusive)
+
+A stronger check than the headless pass was attempted on Linux: run the release
+binary under `Xvfb :99 -screen 0 1400x900x24` with `LIBGL_ALWAYS_SOFTWARE=1`.
+
+Recorded facts (2026-10-02, Linux):
+
+- The process stayed alive in its event loop (`/proc/<pid>/wchan`:
+  `do_epoll_wait`, 38 threads) and logged **no** error — so `eframe` created its
+  window and the GL context, and `on_exit`/`stop_background_work` never had to run.
+- `xdotool search --onlyvisible --name ".*"` found the mapped window.
+- Capturing it came back **blank**: `import -window <id>` produced a uniform
+  two-colour image, and `ffmpeg -f x11grab` produced a black frame
+  (mean 5.5e-5, std 1.4). Xvfb has no compositor, so the GL surface is not
+  readable from the X framebuffer — this is a capture limitation, not evidence
+  that the UI is blank.
+
+So: **the window opens and the loop runs (verified); the UI being visible on
+screen is still PENDING**, and is covered for now only by `ui_headless.rs`,
+which asserts the text `egui` really laid out. A human on a real desktop should
+confirm the pixels.
+
+### 2.3 Linux + real phone
 
 PENDING — needs the hardware. Steps:
 
@@ -91,7 +113,7 @@ PENDING — needs the hardware. Steps:
 10. While the app is open, run `adb devices` in a terminal: it must keep working
     (the app never kills the adb server).
 
-### 2.3 Windows
+### 2.4 Windows
 
 PENDING — needs a Windows machine. Additionally record:
 
@@ -105,7 +127,7 @@ PENDING — needs a Windows machine. Additionally record:
 5. Closing the window while a backup runs: `adb.exe` must still be running
    (`tasklist | findstr adb`).
 
-### 2.4 Cross-checks that are not OS-specific
+### 2.5 Cross-checks that are not OS-specific
 
 | # | Check | Status |
 |---|-------|--------|
@@ -114,7 +136,7 @@ PENDING — needs a Windows machine. Additionally record:
 | 3 | Interrupted transfer leaves no truncated file at the destination | PASS (E2E) |
 | 4 | `last_successful_backup` only advances on a verified copy | PASS (unit) |
 | 5 | Modals re-appear next launch while unresolved | PASS (unit) |
-| 6 | Closing the app does not kill the adb server | PASS (design: nothing in the codebase runs `adb kill-server`; verify manually in 2.2/2.3 step 10) |
+| 6 | Closing the app does not kill the adb server | PASS (design: nothing in the codebase runs `adb kill-server`; verify manually in 2.3/2.4 step 10) |
 
 ---
 
