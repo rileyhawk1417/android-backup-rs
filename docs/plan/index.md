@@ -134,12 +134,51 @@ Decisions taken while building this wave (they refine, not contradict, the plan)
   job row, no phone traffic) *and* again inside the engine (defence in depth).
 
 Wave 6 — Desktop UI
-- [ ] E06.1 App shell
-- [ ] E06.2 Live device list
-- [ ] E06.3 Device detail panel
-- [ ] E06.4 Progress panel
-- [ ] E06.5 History + summaries
-- [ ] E06.6 First-launch flows
+- [x] E06.1 App shell
+- [x] E06.2 Live device list
+- [x] E06.3 Device detail panel
+- [x] E06.4 Progress panel
+- [x] E06.5 History + summaries
+- [x] E06.6 First-launch flows
+
+**Wave 6 gate: PASSED for everything a machine can check; manual run tagged
+`hw-verify-needed`.** `crates/desktop` renders through the real `egui` pass in
+`tests/ui_headless.rs` (11 tests: chrome + empty state, connected device panel,
+Start-button gating, unauthorized help text, running job progress and controls,
+paused reason + Resume, completed summary, welcome wizard, ADB-not-found modal
+with all three routes, error banner, expanded history row). The architecture gate
+is *enforced*, not documented: `tests/architecture.rs` (4 tests) fails the build if
+the UI acquires `sha2`/`rusqlite`/`fs::rename` (backup logic), if `core` acquires
+`egui`/`eframe`/`rfd`, if a second `eframe::App` appears, or if the view stops
+folding core's own `JobEvent`/`JobStatus`. The release binary was started with no
+display: it logs, writes the manifest and the log file, reports the reason, and
+exits 0. The human matrix (real phone on Linux/Windows) is in
+[docs/testing.md](../testing.md) §2 and is PENDING.
+
+Decisions taken while building this wave:
+- **`egui::Context::run` is the test harness.** Asserting on the view model alone
+  would pass even if a panel never drew the value, so the tests read the text out
+  of the frame's shapes. No window, no GPU, no event loop, so it runs in CI.
+- **Rendering and logic are separated by an `Intent` queue.** Widgets push
+  `Intent` values; `App::handle` runs them after the frame, which avoids mutating
+  state while `egui` holds a borrow. Every `Intent` maps to a method call, never
+  to work.
+- **A device with a manifest row but no live snapshot is gated as
+  `Disconnected`.** Otherwise a phone that was unplugged since the last run would
+  show an enabled Start button it cannot honour.
+- **History is re-read on every selection change**, not only on job completion, so
+  the list always matches the manifest (and survives a restart, which is E06.5's
+  acceptance).
+- **The device subfolder may not exist yet; its parent must.** The engine creates
+  `<destination>/<Device Name>/` on the first backup, but if the drive holding the
+  parent is gone, creating the path would silently write to a plain directory on
+  another disk — so validation targets the parent, and the wizard's suggested
+  `~/AndroidBackups` is created explicitly on accept.
+- **One module knows `eframe`** (`window.rs`), so the window size/title/exit
+  behaviour are testable values and `App` stays headless-testable.
+- **Logging is a file, always**: `logs/android-backup.log` under the data
+  directory, `ANDROID_BACKUP_LOG` to override the level, stderr as a fallback when
+  the directory is unusable. A failed log must never stop the app from starting.
 
 Wave 7 — ADB install & reliability
 - [ ] E07.1 Managed installer

@@ -12,8 +12,14 @@ files from Android devices over ADB — no Android Studio, no cloud account.
 
 ## Status
 
-Early development. See [`docs/plan/index.md`](docs/plan/index.md) for the executable
-build plan and [`docs/overview_plan.md`](docs/overview_plan.md) for the product plan.
+Wave 6 of 9: the desktop UI is in place and the backup engine passes its mock
+end-to-end gate. The app can be run today; what is still missing is the managed ADB
+installer (Wave 7) and the release artifacts (Wave 8).
+
+* [`docs/plan/index.md`](docs/plan/index.md) — the executable build plan (progress)
+* [`docs/overview_plan.md`](docs/overview_plan.md) — the product plan
+* [`docs/testing.md`](docs/testing.md) — what is tested automatically, and the
+  manual run matrix
 
 ## Architecture
 
@@ -33,9 +39,19 @@ without touching the engine.
 Requires a stable Rust toolchain.
 
 ```bash
-cargo build --release -p android-backup-desktop
-cargo test --workspace
+cargo run --release -p android-backup-desktop   # open the app
+cargo test --workspace                          # 347 tests
+cargo fmt --check && cargo clippy --workspace --all-targets
 ```
+
+The app keeps its manifest and its log under the platform data directory
+(`~/.local/share/android-backup/` on Linux, `%APPDATA%\android-backup\` on
+Windows). `ANDROID_BACKUP_LOG=debug` raises the log level; the log file is
+`logs/android-backup.log`.
+
+On first launch, pick a backup folder and point the app at `adb` if it is not on
+`PATH`. Then plug in a phone with USB debugging on, approve the prompt on the
+phone, choose the folders to back up, and press **Back up now**.
 
 ## License
 
