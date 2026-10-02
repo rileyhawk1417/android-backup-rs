@@ -167,13 +167,12 @@ impl Adb for ProcessAdbRunner {
         let serial = serial_of(args);
         let started = Instant::now();
 
-        let mut child = self
-            .host
-            .spawn(&mut cmd)
-            .map_err(|source| AdbError::AdbMissing {
+        let mut child = spawn_retrying_busy(self.host.as_ref(), &mut cmd).map_err(|source| {
+            AdbError::AdbMissing {
                 path: self.path.clone(),
                 source,
-            })?;
+            }
+        })?;
 
         let out_reader = match child.stdout.take() {
             Some(handle) => Some(match spawn_reader(handle, "stdout") {
@@ -287,6 +286,36 @@ struct Reader {
 /// output read so far is returned instead.
 const READER_GRACE: Duration = Duration::from_millis(250);
 
+/// How long to keep retrying a spawn whose executable is momentarily busy.
+///
+/// On unix, `exec` fails with `ETXTBSY` while *any* process still holds the file
+/// open for writing — including a child of ours that was forked a moment ago and
+/// is about to `exec` something else. The window is microseconds wide, so a
+/// handful of retries closes it; the whole budget is 100 ms. This is not only a
+/// test artefact: the managed adb installer replaces the binary in place, so a
+/// spawn can land inside that window for real.
+const BUSY_SPAWN_RETRIES: u32 = 20;
+const BUSY_SPAWN_BACKOFF: Duration = Duration::from_millis(5);
+
+/// Spawn, retrying only while the kernel says the executable is busy.
+fn spawn_retrying_busy(host: &dyn ProcessHost, cmd: &mut Command) -> std::io::Result<Child> {
+    let mut attempt = 0;
+    loop {
+        match host.spawn(cmd) {
+            Ok(child) => return Ok(child),
+            Err(err) if is_executable_busy(&err) && attempt < BUSY_SPAWN_RETRIES => {
+                attempt += 1;
+                std::thread::sleep(BUSY_SPAWN_BACKOFF);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn is_executable_busy(err: &std::io::Error) -> bool {
+    matches!(err.kind(), std::io::ErrorKind::ExecutableFileBusy)
+}
+
 fn spawn_reader(
     mut handle: impl Read + Send + 'static,
     which: &'static str,
@@ -374,6 +403,7 @@ fn truncate(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::testutil::write_script;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
     fn runs_a_successful_command() {
@@ -451,6 +481,103 @@ mod tests {
     fn serial_is_extracted_for_error_context() {
         assert_eq!(serial_of(&["-s", "XYZ", "shell"]), Some("XYZ".to_string()));
         assert_eq!(serial_of(&["devices"]), None);
+    }
+
+    /// A host that fails `spawn` a fixed number of times before letting one through.
+    struct BusyHost {
+        busy_left: AtomicU32,
+        attempts: AtomicU32,
+        always: bool,
+    }
+
+    impl BusyHost {
+        fn busy(times: u32) -> Arc<Self> {
+            Arc::new(Self {
+                busy_left: AtomicU32::new(times),
+                attempts: AtomicU32::new(0),
+                always: false,
+            })
+        }
+
+        fn always_busy() -> Arc<Self> {
+            Arc::new(Self {
+                busy_left: AtomicU32::new(u32::MAX),
+                attempts: AtomicU32::new(0),
+                always: true,
+            })
+        }
+    }
+
+    impl ProcessHost for BusyHost {
+        fn spawn(&self, cmd: &mut Command) -> std::io::Result<Child> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            if self.always
+                || self
+                    .busy_left
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ExecutableFileBusy,
+                    "Text file busy",
+                ));
+            }
+            PlainProcessHost.spawn(cmd)
+        }
+
+        fn kill(&self, child: &mut Child) {
+            PlainProcessHost.kill(child);
+        }
+    }
+
+    #[test]
+    fn a_busy_executable_is_retried_and_then_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(dir.path(), "busy", &["echo hello"]);
+        let host = BusyHost::busy(3);
+        let runner = ProcessAdbRunner::new(script).with_host(host.clone());
+        let out = runner.run(&["version"], Duration::from_secs(10)).unwrap();
+        assert_eq!(out.stdout.trim(), "hello");
+        // Three refusals plus the successful spawn.
+        assert_eq!(host.attempts.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn a_permanently_busy_executable_gives_up_instead_of_hanging() {
+        let host = BusyHost::always_busy();
+        let runner = ProcessAdbRunner::new("/nonexistent/adb-busy").with_host(host.clone());
+        let err = runner
+            .run(&["version"], Duration::from_secs(5))
+            .unwrap_err();
+        assert!(matches!(err, AdbError::AdbMissing { .. }), "{err:?}");
+        assert_eq!(
+            host.attempts.load(Ordering::SeqCst),
+            BUSY_SPAWN_RETRIES + 1,
+            "the retry budget must be bounded"
+        );
+    }
+
+    #[test]
+    fn other_spawn_errors_are_not_retried() {
+        struct BrokenHost;
+        impl ProcessHost for BrokenHost {
+            fn spawn(&self, _cmd: &mut Command) -> std::io::Result<Child> {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"))
+            }
+            fn kill(&self, _child: &mut Child) {}
+        }
+
+        let runner = ProcessAdbRunner::new("/nonexistent/adb").with_host(Arc::new(BrokenHost));
+        let started = Instant::now();
+        let err = runner
+            .run(&["version"], Duration::from_secs(5))
+            .unwrap_err();
+        assert!(matches!(err, AdbError::AdbMissing { .. }), "{err:?}");
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "a missing executable must fail immediately, took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
