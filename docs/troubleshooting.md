@@ -1,0 +1,323 @@
+# Troubleshooting
+
+The problems people actually hit, in the order they hit them. Most of these end
+at "look at the log file" — [§15](#15-reading-the-log-and-what-to-send-in-a-bug-report)
+says where it is and what to include.
+
+- [1. The phone never appears in the device list](#1-the-phone-never-appears-in-the-device-list)
+- [2. The phone shows as `unauthorized`](#2-the-phone-shows-as-unauthorized)
+- [3. `no permissions (user in plugdev group; are your udev rules wrong?)`](#3-no-permissions-user-in-plugdev-group-are-your-udev-rules-wrong)
+- [4. `adb server version doesn't match this client`](#4-adb-server-version-doesnt-match-this-client)
+- [5. adb is missing, or will not run](#5-adb-is-missing-or-will-not-run)
+- [6. The backup will not start](#6-the-backup-will-not-start)
+- [7. The destination drive went away mid-backup](#7-the-destination-drive-went-away-mid-backup)
+- [8. `not enough free space`](#8-not-enough-free-space)
+- [9. The app or the machine died mid-backup](#9-the-app-or-the-machine-died-mid-backup)
+- [10. A file changed on the phone — where is the old copy?](#10-a-file-changed-on-the-phone--where-is-the-old-copy)
+- [11. I deleted files on the phone; the computer still has them](#11-i-deleted-files-on-the-phone-the-computer-still-has-them)
+- [12. Two devices share history, or a rename split it in two](#12-two-devices-share-history-or-a-rename-split-it-in-two)
+- [13. "The backup manifest could not be read"](#13-the-backup-manifest-could-not-be-read)
+- [14. Some folders always fail](#14-some-folders-always-fail)
+- [15. Reading the log, and what to send in a bug report](#15-reading-the-log-and-what-to-send-in-a-bug-report)
+- [16. Windows SmartScreen, and Linux artifacts that will not start](#16-windows-smartscreen-and-linux-artifacts-that-will-not-start)
+
+---
+
+## 1. The phone never appears in the device list
+
+Work down this list; each step tells you whether the next one is worth doing.
+
+1. **Is the cable a data cable?** Charge-only cables are extremely common and
+   look identical. Try another cable before anything else.
+2. **Is the phone unlocked?** Locked phones still advertise themselves, but the
+   authorization prompt cannot be approved.
+3. **Does the computer see the hardware at all?**
+   - Linux: `lsusb` — look for your phone's vendor (e.g. `18d1` Google,
+     `04e8` Samsung, `2717` Xiaomi).
+   - Windows: Device Manager — look for an unknown device, or "Android ADB
+     Interface" in the list.
+   - If the hardware is missing, it is a cable, port, or driver problem
+     ([setup §5](setup.md#5-let-your-computer-talk-to-the-phone)).
+4. **Does `adb` see it?** This separates an adb problem from an app problem.
+   Use **the same adb the app uses** — on Linux, if the app installed its own:
+   `~/.local/share/android-backup/platform-tools/adb devices -l`. On Windows:
+   `%APPDATA%\android-backup\platform-tools\adb.exe devices -l`.
+
+   | Output | Meaning | Go to |
+   |---|---|---|
+   | nothing listed | hardware/driver/udev | [§3](#3-no-permissions-user-in-plugdev-group-are-your-udev-rules-wrong), [setup §5](setup.md#5-let-your-computer-talk-to-the-phone) |
+   | `unauthorized` | the phone has not approved this computer | [§2](#2-the-phone-shows-as-unauthorized) |
+   | `no permissions` | udev rules (Linux) | [§3](#3-no-permissions-user-in-plugdev-group-are-your-udev-rules-wrong) |
+   | `offline` | adb's connection is stale | replug, or `adb kill-server` |
+5. **Restart the adb server**:
+   `<adb> kill-server` and replug the phone. The app polls every few seconds, so
+   the list updates on its own.
+
+## 2. The phone shows as `unauthorized`
+
+The phone must approve this specific computer once.
+
+1. Unlock the phone and replug it. You should see **"Allow USB debugging?"**.
+   Tick **Always allow from this computer** and tap **Allow**.
+2. No dialog? Open **Developer options → Revoke USB debugging authorizations**,
+   then replug. This clears the stored approvals and forces the prompt again.
+3. Still nothing? Delete this computer's adb key so a new one is offered:
+   - Linux: remove `~/.android/adbkey` and `~/.android/adbkey.pub`, then
+     `adb kill-server` and replug.
+   - Windows: remove `%USERPROFILE%\.android\adbkey` and `adbkey.pub`, then
+     `adb kill-server` and replug.
+4. The app shows this state as a disabled **Back up now** button with the
+   message *"device … is not authorized"*. It will not silently copy nothing.
+
+## 3. `no permissions (user in plugdev group; are your udev rules wrong?)`
+
+Linux only, and the single most common Linux problem: the phone is visible to
+root and to nothing else. Install the udev rules and unplug/replug —
+[setup §5](setup.md#5-let-your-computer-talk-to-the-phone) has the commands for
+Debian/Ubuntu and Arch, plus the manual rule file if your distribution has no
+package for it.
+
+Two details that catch people out:
+
+- **Group membership only applies to new sessions.** After
+  `sudo usermod -aG plugdev "$USER"` you must log out and back in (or reboot);
+  `groups` should list `plugdev`.
+- **udev applies rules when the device is attached.** Reloading the rules is not
+  enough — unplug and replug the cable.
+
+## 4. `adb server version doesn't match this client`
+
+There are two different `adb` binaries on the machine: one is already running as
+a server (started by Android Studio, a system package, or an earlier session),
+and the app's `adb` is a different build. They cannot talk to each other.
+
+The app detects this and shows a **server conflict** panel with the two options
+that fix it:
+
+1. Stop the running server: `<adb> kill-server`, then **Try again**. The app's
+   adb then starts the server itself.
+2. Or tell the app to use that other adb instead: **Choose adb…** and pick the
+   binary whose version matches the running server.
+
+If you want to avoid this permanently, pick one adb and stay with it. A phone
+that works with Android Studio's adb and one that works with the system package
+are usually the same phone — the versions just have to agree.
+
+## 5. adb is missing, or will not run
+
+The app shows an **adb** panel with the exact error and four buttons; see
+[setup §7](setup.md#7-first-launch) for what each one does. Specific cases:
+
+- **"adb was found at … but could not be run"** — the file is not executable, or
+  it is not an adb (a stale symlink, a partially downloaded archive). Either
+  `chmod +x` it, or use **Install automatically**.
+- **The app installed adb, but you also have an older one** — that is fine and
+  intentional: the managed copy takes precedence because it is the one whose
+  version the app verified. Switch to your own with **Choose adb…** if you
+  prefer.
+- **Offline machine, or a blocked download** — the app needs internet only for
+  the managed install. Install platform-tools yourself from Google's
+  `platform-tools` archive, then use **Choose adb…** and point at the binary.
+- **A proxy** — the download respects the usual environment variables
+  (`HTTPS_PROXY`/`HTTP_PROXY` on Linux, the system proxy on Windows).
+
+## 6. The backup will not start
+
+The **Back up now** button is disabled and says why, inline. The messages map to:
+
+| Message | Fix |
+|---|---|
+| *Select a device first.* | Pick a phone in the **Devices** list. |
+| *This device is not in the manifest yet — waiting for the first poll.* | Wait a few seconds; the app is waiting to record the device. |
+| *A backup is already running (…).* | One job per device at a time. Let it finish, or **Cancel** it. |
+| *No backup location is configured — choose one in the device panel.* | **Change…** next to **Backup to**. |
+| *adb is not available, so backups cannot start.* | [§5](#5-adb-is-missing-or-will-not-run). |
+| *device … is not authorized …* | [§2](#2-the-phone-shows-as-unauthorized). |
+| *no device is connected …* | [§1](#1-the-phone-never-appears-in-the-device-list). |
+| *Select at least one folder before starting.* | Tick a folder, or add one. |
+
+If nothing is wrong and the button still refuses, the log ([§15](#15-reading-the-log-and-what-to-send-in-a-bug-report))
+records the exact reason the UI is gating on.
+
+## 7. The destination drive went away mid-backup
+
+An external drive that is unplugged, unmounted, or that slept during a long
+copy. The job **pauses** rather than failing: the message names the drive, and
+the file it was copying is not recorded as copied. Reconnect the drive and press
+**Resume**; already-completed files are not re-copied.
+
+At start-up the app checks the destination before copying anything (so a missing
+drive fails immediately, with *"the backup location … does not exist (is the
+drive still connected?)"*, instead of after ten minutes of scanning).
+
+## 8. `not enough free space`
+
+The app compares the planned bytes against the free space of the destination
+before the copy starts. Free some space, or point **Backup to** at another
+drive. Note that the check is a prediction from the phone's reported file sizes:
+a phone whose files grow during the backup can still run out, in which case the
+individual file fails and the job finishes with a failure count rather than
+pretending it copied everything.
+
+## 9. The app or the machine died mid-backup
+
+Nothing is lost and nothing is corrupt; the next run fixes itself up:
+
+- Files being copied live in `<destination>/<device>/.incomplete/*.part` and are
+  only moved into place (and recorded in the manifest) after the copy is
+  complete and verified. An interrupted file is therefore simply not recorded.
+- On start-up the app closes any job left open by the crash, sweeps stale
+  `.part` files, and the next backup copies the unfinished files again.
+- The manifest is a SQLite database in WAL mode, so a hard power loss leaves it
+  either at the last committed transaction or recoverable — SQLite handles that
+  part, not the app.
+
+You do not need to delete anything by hand. If you want to, `.incomplete/` is
+safe to remove while the app is closed.
+
+## 10. A file changed on the phone — where is the old copy?
+
+Nowhere was overwritten. Before replacing a file, the app moves the existing one
+into the history tree:
+
+```
+<destination>/<device>/.backup/history/<original path>/<job start time>-<hash8>/<file>
+```
+
+So `DCIM/Camera/IMG_0001.jpg` that changed on 2026-03-01 leaves its previous
+copy at, for example,
+`.backup/history/DCIM/Camera/1772400000-1a2b3c4d/IMG_0001.jpg`. The timestamp is
+the job's start time in Unix seconds and the hash is derived from the version,
+which is what stops two history entries from colliding. To restore, copy the
+file back out of `.backup/history/...`.
+
+The **History** panel in the app shows each job and, expanded, the individual
+files it copied or failed — including rows whose file was later versioned.
+
+## 11. I deleted files on the phone; the computer still has them
+
+That is by design: deleting a file on the phone never deletes your copy. The
+computer's copy is the backup; a phone-side accident is exactly the case it
+exists for.
+
+If you want to reclaim the space, delete the files yourself — they are ordinary
+files in an ordinary folder. Nothing in the app will fight you, and the next
+backup only re-copies what is on the phone now.
+
+## 12. Two devices share history, or a rename split it in two
+
+- **Two phones with the same display name** get separate folders automatically:
+  the last four characters of the serial are appended (`Kitchen phone_BCDE`), and
+  the histories stay separate. Nothing to do.
+- **Renaming a device** changes its default folder name but does not move or
+  delete anything already backed up: the old folder stays where it is, and the
+  next backup goes to the new one. If you want them together, either point the
+  renamed device at the old folder with **Change…**, or set an explicit path.
+- **A device re-appeared with a different serial** (repaired phone, replaced
+  under warranty, a network ADB serial). By default it is a **new** device with
+  its own profile and its own empty history — the safe default, since the app
+  cannot know the two are the same phone. Associating the new serial with the
+  existing profile is a deliberate, one-way action in this MVP and there is no
+  un-associate button, so it is done in the manifest by hand:
+
+  ```sh
+  # close the app first, then, in the data directory from setup §8:
+  sqlite3 manifest.db
+  ```
+
+  ```sql
+  -- which serial is which profile?
+  SELECT id, serial, display_name FROM devices;
+
+  -- point the new serial at the existing profile (e.g. id 3)
+  INSERT INTO device_aliases (alias_serial, device_id, created_at)
+  VALUES ('R58M12ABCDE', 3, '2026-03-01T10:00:00Z');
+  ```
+
+  To undo it, delete that row (`DELETE FROM device_aliases WHERE alias_serial = '…';`).
+  Historical rows are never rewritten, so the existing history stays byte-identical
+  either way. Take a copy of `manifest.db` before editing, as with any database.
+
+## 13. "The backup manifest could not be read"
+
+The manifest is the index of what has been copied — never the only copy of
+anything. If SQLite cannot read it (a truncated file, a power cut mid-write, a
+disk error), the app:
+
+1. keeps the damaged file as `manifest.db.corrupt-<timestamp>` (along with its
+   `-wal`/`-shm` sidecars, so a repair is possible),
+2. starts with a fresh manifest, and
+3. tells you, with this text: *"Your backed-up files are not affected: the
+   manifest only records what has already been copied. The next backup will
+   re-copy the files it no longer has a record of."*
+
+The practical consequence: your files are safe, but the next backup is a full
+one and may version files into `.backup/history/` that were not really changed
+(because the app no longer has the old size/mtime record to compare against).
+That is why the damaged file is kept — with SQLite's own recovery tools
+(`sqlite3 manifest.db.corrupt-… .recover`) it can often be salvaged, and the
+manifest can be put back in place.
+
+## 14. Some folders always fail
+
+Android protects certain directories from apps and from ADB on a normal
+(non-rooted) phone. The usual suspects:
+
+| Path | Why |
+|---|---|
+| `Android/data` | per-app storage, locked by Android 11+ |
+| `Android/obb` | app asset bundles, locked |
+| `Android/media` subfolders | partially readable; app-dependent |
+| DCIM subfolders of some OEM camera apps | protected until the phone is unlocked |
+
+Failed files are counted and listed in the job's history rows rather than
+silently dropped — a job that says `failed: 40` is telling you the truth. If a
+folder you care about is in that list, the file itself is not readable over ADB
+and no backup tool without root can read it either.
+
+## 15. Reading the log, and what to send in a bug report
+
+The log is a plain text file:
+
+| Platform | Path |
+|---|---|
+| Linux | `~/.local/share/android-backup/logs/android-backup.log` |
+| Windows | `%APPDATA%\android-backup\logs\android-backup.log` |
+
+It is `info` level by default, with this project's own modules at `debug` — so it
+records what the UI decided (which adb was chosen, why the start button was
+gated, what each transfer did) without the noise of every dependency. For more
+detail, set the level before launching:
+
+```sh
+# Linux
+ANDROID_BACKUP_LOG=debug android-backup
+```
+```powershell
+# Windows (PowerShell)
+$env:ANDROID_BACKUP_LOG = "trace"; .\android-backup.exe
+```
+
+`trace` includes every adb command line and the engine's per-file decisions. It
+is verbose (a large backup can produce tens of megabytes) — reproduce the
+problem, then go back to `debug`.
+
+Useful before reporting: `adb devices -l` from the adb the app is using, the log
+file, the version (`android-backup --version`), and the platform (Windows or
+Linux, distribution/version). Do not send your backup destination listings or
+file names you would rather not share: the log records paths, and it is easy to
+trim.
+
+## 16. Windows SmartScreen, and Linux artifacts that will not start
+
+- **Windows: "Windows protected your PC".** The build is unsigned —
+  [release.md](release.md) records why, and what signing would change. Choose
+  **More info → Run anyway**. If you would rather not, verify the artifact's
+  SHA-256 first ([setup §2](setup.md#2-download)).
+- **Linux: the AppImage does nothing.** Install FUSE (`sudo apt install
+  libfuse2` on Ubuntu 22.04+) or run it with `--appimage-extract-and-run`, which
+  unpacks to a temporary directory instead of mounting.
+- **Linux: `GLIBC_2.xx not found`.** The binary was built against a newer glibc
+  than your distribution provides. See [setup §3](setup.md#3-install--linux) —
+  the release notes record the floor each artifact was built against, and
+  building from source is the other way out.
