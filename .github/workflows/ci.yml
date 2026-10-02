@@ -1,0 +1,53 @@
+name: CI
+
+# The green gate from docs/plan/index.md rule 1: fmt, clippy, tests, on both
+# target operating systems. Windows is in the matrix from the first commit on
+# purpose — the backup utility must work without Android Studio on a machine
+# that has never seen one, and a Windows-only failure found at release time is a
+# rewrite, not a fix.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # eframe/winit links against these on Linux. Everything else the crates
+      # need (rusqlite, sha2, reqwest with rustls) is vendored or pure Rust.
+      - name: Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libxkbcommon-dev libwayland-dev \
+            libx11-dev libgl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace

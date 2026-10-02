@@ -1,0 +1,36 @@
+name: Nightly (network)
+
+# The one part of the installer that fixtures cannot cover: whether the manifest
+# Google is serving *today* still parses, whether the digest it publishes still
+# matches the archive it serves, and whether the extracted binary still runs.
+#
+# It is deliberately non-blocking: `continue-on-error` means a Google outage, a
+# proxy, or a changed manifest cannot block a pull request or turn main red — it
+# shows up as a failed nightly run for a human to look at. The per-commit suite
+# covers the same code paths against fixtures (see docs/testing.md §3).
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  installer-end-to-end:
+    name: installer end to end (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install platform-tools from dl.google.com and run it
+        run: >
+          cargo test -p android-backup-core --test installer_network
+          -- --ignored --nocapture
