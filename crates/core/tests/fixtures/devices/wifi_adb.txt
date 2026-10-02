@@ -1,0 +1,2 @@
+List of devices attached
+192.168.1.20:5555	device product:redfin model:Pixel_5 device:redfin transport_id:7

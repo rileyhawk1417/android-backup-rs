@@ -295,6 +295,26 @@ pub fn touch_device(db: &Db, serial: &str, props: &DeviceProps) -> Result<Device
     Ok(device)
 }
 
+/// The database as the device watcher's sink.
+///
+/// This is where a phone stops being a line of `adb` output and becomes a record
+/// with an identity (plan §5.2): the first time the watcher sees a serial, and
+/// whenever the device tells us more about itself, the row is written or
+/// enriched. A failed write is logged rather than propagated — a full disk must
+/// not take down device detection, and the next tick will try again.
+impl crate::devices::DeviceSink for Db {
+    fn upsert(&self, device: &crate::devices::DeviceInfo) {
+        let props = device.effective_props();
+        if let Err(err) = touch_device(self, &device.serial, &props) {
+            tracing::warn!(
+                serial = %device.serial,
+                error = %err,
+                "could not record a device profile"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,5 +475,57 @@ mod tests {
             rename(&db, 42, "x"),
             Err(DbError::NotFound { .. })
         ));
+    }
+
+    #[test]
+    fn the_watcher_sink_records_a_device_and_its_folders() {
+        use crate::adb::parse::{DeviceSnapshot, RawState};
+        use crate::devices::{DeviceInfo, DeviceSink};
+
+        let db = Db::open_in_memory().unwrap();
+        let snapshot = DeviceSnapshot {
+            serial: "R58M12ABCDE".into(),
+            state: RawState::Device,
+            model: Some("SM_A536B".into()),
+            product: Some("a53x".into()),
+            transport_id: Some("3".into()),
+        };
+        let info = DeviceInfo::from_snapshot(&snapshot).with_props(sample_props());
+        db.upsert(&info);
+
+        let row = get_by_serial(&db, "R58M12ABCDE").unwrap().unwrap();
+        assert_eq!(row.display_name, "Samsung SM-A536B");
+        assert_eq!(row.android_version.as_deref(), Some("14"));
+        assert_eq!(folders(&db, row.id).unwrap().len(), DEFAULT_FOLDERS.len());
+
+        // A second sighting enriches but does not duplicate, and a user's rename
+        // survives it (plan §5.2).
+        rename(&db, row.id, "My phone").unwrap();
+        db.upsert(&info);
+        assert_eq!(list(&db).unwrap().len(), 1);
+        assert_eq!(
+            get_by_id(&db, row.id).unwrap().unwrap().display_name,
+            "My phone"
+        );
+    }
+
+    #[test]
+    fn the_sink_uses_the_listing_model_when_getprop_was_silent() {
+        use crate::adb::parse::{DeviceSnapshot, RawState};
+        use crate::devices::{DeviceInfo, DeviceSink};
+
+        let db = Db::open_in_memory().unwrap();
+        let snapshot = DeviceSnapshot {
+            serial: "SER1".into(),
+            state: RawState::Device,
+            model: Some("Pixel_7".into()),
+            product: None,
+            transport_id: None,
+        };
+        db.upsert(&DeviceInfo::from_snapshot(&snapshot));
+        assert_eq!(
+            get_by_serial(&db, "SER1").unwrap().unwrap().display_name,
+            "Pixel-7"
+        );
     }
 }

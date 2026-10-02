@@ -31,6 +31,26 @@ impl RawState {
             Self::Unrecognized(s) => s,
         }
     }
+
+    /// Whether adb actually prints this token as a device state.
+    ///
+    /// Used only to tell a genuine space-separated entry (some emulator builds)
+    /// from a chatter line that merely splits into two words — `adb server
+    /// version (41) doesn't match this client (39)` must not become a phantom
+    /// device called `adb`.
+    pub fn is_known_token(token: &str) -> bool {
+        matches!(
+            token.to_ascii_lowercase().as_str(),
+            "device"
+                | "unauthorized"
+                | "offline"
+                | "recovery"
+                | "bootloader"
+                | "sideload"
+                | "rescue"
+                | "host"
+        )
+    }
 }
 
 /// One entry from `adb devices -l`.
@@ -60,8 +80,17 @@ pub enum ParseError {
 /// as [`RawState::Unrecognized`] rather than causing a failure, because a future
 /// adb version inventing a state must not make the app blind.
 pub fn parse_devices(output: &str) -> Result<Vec<DeviceSnapshot>, ParseError> {
+    // adb prints chatter *before* the header (`* daemon started successfully`,
+    // `adb server version (41) doesn't match this client (39)`). Everything above
+    // the header is noise by construction, so it is not parsed at all. If the
+    // header is missing (a wrapper that only forwards the entries), the whole
+    // input is parsed and [`RawState::is_known_token`] does the filtering.
+    let body = match header_end(output) {
+        Some(index) => &output[index..],
+        None => output,
+    };
     let mut devices = Vec::new();
-    for raw_line in output.lines() {
+    for raw_line in body.lines() {
         let line = raw_line.trim_end_matches(['\r', '\n']).trim_end();
         if line.is_empty() {
             continue;
@@ -79,6 +108,21 @@ pub fn parse_devices(output: &str) -> Result<Vec<DeviceSnapshot>, ParseError> {
     Ok(devices)
 }
 
+/// Byte offset just past the `List of devices attached` header, if there is one.
+fn header_end(output: &str) -> Option<usize> {
+    let mut offset = 0;
+    for line in output.split_inclusive('\n') {
+        offset += line.len();
+        if line
+            .to_ascii_lowercase()
+            .contains("list of devices attached")
+        {
+            return Some(offset);
+        }
+    }
+    None
+}
+
 fn parse_line(line: &str) -> Option<DeviceSnapshot> {
     // Serials may contain ':' (wifi adb), so the tab is the only safe separator.
     let (serial, rest) = match line.split_once('\t') {
@@ -88,6 +132,9 @@ fn parse_line(line: &str) -> Option<DeviceSnapshot> {
             let mut it = line.split_whitespace();
             let serial = it.next()?;
             let rest = it.next()?;
+            if !RawState::is_known_token(rest) {
+                return None;
+            }
             let remainder = it.collect::<Vec<_>>().join(" ");
             if remainder.is_empty() {
                 (serial, rest)
@@ -207,6 +254,41 @@ mod tests {
         let out = "List of devices attached\nABC123\twho_knows\n";
         let devices = parse_devices(out).unwrap();
         assert_eq!(devices[0].state, RawState::Unrecognized("who_knows".into()));
+    }
+
+    #[test]
+    fn a_version_mismatch_warning_is_not_a_device() {
+        // Real output from a machine whose adb server is older than the client.
+        let out = "adb server version (41) doesn't match this client (39); killing...\n\
+                   * daemon started successfully\n\
+                   List of devices attached\n\
+                   ABC123\tdevice\n";
+        let devices = parse_devices(out).unwrap();
+        assert_eq!(devices.len(), 1, "phantom device: {devices:?}");
+        assert_eq!(devices[0].serial, "ABC123");
+    }
+
+    #[test]
+    fn chatter_without_a_header_is_still_filtered() {
+        // No header at all: the only thing keeping `adb server` out is the
+        // known-state-token rule, which is why it exists.
+        let out = "adb server version (41) doesn't match this client (39)\n\
+                   ABC123 device\n";
+        let devices = parse_devices(out).unwrap();
+        assert_eq!(devices.len(), 1, "phantom device: {devices:?}");
+        assert_eq!(devices[0].serial, "ABC123");
+        assert_eq!(devices[0].state, RawState::Device);
+    }
+
+    #[test]
+    fn a_space_separated_unknown_state_is_skipped_not_invented() {
+        // With a tab, an unknown token is a real device (see above). Without one
+        // there is no way to tell it from prose, so it is dropped.
+        assert!(
+            parse_devices("List of devices attached\nABC123 who_knows\n")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

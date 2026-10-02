@@ -34,6 +34,7 @@ pub mod backup;
 pub mod clock;
 pub mod config;
 pub mod database;
+pub mod devices;
 pub mod error;
 pub mod mock;
 pub mod paths;

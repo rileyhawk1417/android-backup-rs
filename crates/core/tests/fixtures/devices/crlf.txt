@@ -1,0 +1,3 @@
+List of devices attached
+ABC123	device
+DF94	unauthorized
