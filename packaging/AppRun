@@ -1,0 +1,27 @@
+#!/bin/sh
+# AppRun for the Android Backup Utility AppImage.
+#
+# The AppImage spec requires an executable AppRun at the AppDir root (that is
+# what "the AppImage" is: an AppRun plus a squashfs of everything it needs), so
+# this file exists to satisfy the format rather than to do much. It has one
+# job: fail with a sentence a user can act on when the payload is broken,
+# instead of the shell's "not found".
+#
+# Note on windowing: winit 0.30 chooses the backend itself — Wayland when
+# WAYLAND_DISPLAY or WAYLAND_SOCKET is set and non-empty, X11 when DISPLAY is,
+# and neither can be forced by an environment variable (the old
+# WINIT_UNIX_BACKEND was removed in 0.29). Both backends are compiled in, so
+# there is nothing to fix up here and no variable to set.
+
+set -eu
+
+here="$(dirname "$(readlink -f "$0")")"
+app="$here/usr/bin/android-backup"
+
+if [ ! -x "$app" ]; then
+    echo "android-backup: the AppImage payload is incomplete ($app is missing)." >&2
+    echo "Re-download it; if it still fails, please report the artifact's checksum." >&2
+    exit 1
+fi
+
+exec "$app" "$@"

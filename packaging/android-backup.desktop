@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Android Backup Utility
+GenericName=Phone Backup
+Comment=Back up files from an Android device over ADB
+Exec=android-backup
+Icon=android-backup
+Terminal=false
+Categories=Utility;
+Keywords=android;adb;backup;phone;photos;
+StartupNotify=true
+StartupWMClass=android-backup
