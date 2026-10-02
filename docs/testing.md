@@ -18,14 +18,15 @@ manual rows below stay **PENDING** until a human with hardware fills them in.
 
 | Suite | Command | What it proves |
 |-------|---------|----------------|
-| Core unit | `cargo test -p android-backup-core --lib` (259) | ADB runner/parser/locator, manifest repositories, path sanitization, watcher, gate, engine internals |
+| Core unit | `cargo test -p android-backup-core --lib` (287) | ADB runner/parser/locator, manifest repositories, path sanitization, watcher, gate, engine internals, managed-installer manifest/zip/swap |
 | Device fixtures | `cargo test -p android-backup-core --test device_listing_fixtures` (8) | `adb devices -l` parsing across CRLF, spacing, daemon chatter and 11 real-world fixtures |
 | Engine E2E | `cargo test -p android-backup-core --test e2e_backup` (25) | The whole backup engine on a scripted phone (Wave 5 hard gate) |
-| UI unit | `cargo test -p android-backup-desktop --lib` (40) | View model folding, gating, intents, startup planning, logging |
-| UI headless | `cargo test -p android-backup-desktop --test ui_headless` (11) | Real `egui::Context::run` frames, asserting the text actually laid out |
+| Reliability scenarios | `cargo test -p android-backup-core --test scenario_*` (23) | Disconnect, unauthorized, crash mid-write, duplicate names, corrupt manifest, 50k files, history/versioning |
+| UI unit | `cargo test -p android-backup-desktop --lib` (50) | View model folding, gating, intents, startup planning, logging, managed-install flow |
+| UI headless | `cargo test -p android-backup-desktop --test ui_headless` (13) | Real `egui::Context::run` frames, asserting the text actually laid out (incl. install progress + cancel) |
 | Architecture | `cargo test -p android-backup-desktop --test architecture` (4) | No backup logic in the UI, no `egui` in core, one `eframe::App`, UI folds core types |
 
-Last full run: **347 tests, 0 failed** (Linux, rustc 1.97.0). Also verified:
+Last full run: **410 tests, 0 failed** (Linux, rustc 1.97.0). Also verified:
 `cargo build --release -p android-backup-desktop` succeeds, and the release
 binary, started with no display available, exits 0 after logging
 `could not open the window: … neither WAYLAND_DISPLAY nor WAYLAND_SOCKET nor DISPLAY is set`
@@ -140,11 +141,56 @@ PENDING — needs a Windows machine. Additionally record:
 
 ---
 
-## 3. Known gaps entering Wave 7
+## 3. Managed ADB install (Wave 7, E07.1)
 
-- **"Install automatically" is disabled** and says "coming in a later build". This
-  is the planned graceful degradation (E06.6.1b) until Wave 7 lands.
-- **Managed ADB is located but never installed** — `adb_mode = Managed` falls back
-  to the same search as `System` until E07.1.
-- **Unauthorized mid-backup**: the engine pauses and the UI explains, but the
-  automatic re-arm once the phone is re-authorized is E07.2.
+The installer downloads platform-tools from Google's pinned manifest
+(`repository2-3.xml`, `dl.google.com` only), verifies the archive against the
+published digest *before* extracting, extracts only the files adb needs, and
+swaps the result into `<data>/platform-tools` only after the new binary answers
+`adb version`. Interruption safety is structural: everything happens in a staging
+directory beside the target, and the previous installation is untouched until the
+rename.
+
+What is proven automatically:
+
+| Scenario | Evidence |
+|---|---|
+| Manifest parse: latest revision per OS, sizes, digests | `adb::installer` unit tests (fixture manifest) |
+| Archive installs; only the allow-listed files land | `adb::installer` unit tests (`platform_tools_zip` fixture) |
+| Checksum mismatch → nothing installed, previous binary intact | `adb::installer` unit tests |
+| Truncated download → size check + retry | `adb::installer` unit tests |
+| Zip-slip / absolute entry → rejected before any write | `adb::installer` unit tests |
+| No free space → typed error, no partial install | `adb::installer` unit tests (`MockFsProbe`) |
+| UI: progress modal, byte counts, Cancel, failure keeps the routes out open | `ui_headless.rs` (2 tests) + `app.rs` (5 tests) |
+| A cancel changes nothing; a failed install writes no config | `app.rs::cancelling_an_install_says_nothing_was_changed` |
+| One click = one download | `app.rs::a_second_install_request_while_one_is_running_is_ignored` |
+
+**PENDING (needs a network and a clean machine):** a real end-to-end install on
+Windows and on Linux — i.e. 9 MB really downloaded, `adb version` really printed,
+and the app really backing up with the managed binary. Also PENDING: the
+proxy/offline case (what the modal says when the manifest host is unreachable)
+and a mid-download network drop. Tagged `hw-verify-needed` for E08.4.
+
+---
+
+## 4. Reliability scenarios (Wave 7, E07.3)
+
+| Scenario | What it proves |
+|---|---|
+| `scenario_disconnect.rs` | A cable pull pauses the job, names the interrupted file, and the next job copies only the remainder (no re-copy of verified files); an unauthorized phone pauses with USB-debugging guidance and records nothing as failed |
+| `scenario_kill_db_write.rs` | A kill between `rename` and the manifest write is recovered by `recovery::recover_device`: unfinished jobs are closed, partials swept, and a committed file without its row is versioned into history rather than overwritten |
+| `scenario_duplicate_names.rs` | Same display name → disambiguated by serial tail; same file name in different folders → distinct destinations; overlapping selections → copied once |
+| `scenario_corrupt_db.rs` | A truncated manifest is quarantined and replaced, and the next backup versions existing files into history instead of overwriting |
+| `scenario_large.rs` | 50,000 files: scan+compare ≈ 0.7 s (budget 60 s) with bounded allocator growth (~30 MB) |
+| `scenario_overlap_and_history.rs` | 10 versions of one file, a rename, and sanitized-name collisions all keep the history tree correct |
+
+---
+
+## 5. Known gaps entering Wave 8
+
+- **A real phone has never been used.** Everything is mock-driven; the Wave 6/8
+  human matrix in §2 is still PENDING.
+- **Managed ADB is installed but never exercised end-to-end** (see §3).
+- **Windows is unverified**: nothing has been built or run there yet (E08.1).
+- **Resume after re-authorization is manual** by design: the engine pauses and the
+  UI explains, the user presses Resume (automatic re-arm is out of scope, plan §13).

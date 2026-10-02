@@ -121,6 +121,8 @@ egui/eframe specifics to respect throughout:
       `[Choose adb binary…]` (rfd file pick), `[Install automatically]` → until
       Wave 7 exists, show "coming in a later build" disabled button (graceful
       degradation is acceptable and expected here — note it in the wave gate).
+      *Landed in E07.1.2*: the button is live, opens a progress modal and
+      switches the config to `Managed` once the new binary answers `adb version`.
    c. Server conflict (`AdbError::ServerError`) → modal with the raw message +
       guidance, app continues (watcher retries).
 2. All modals re-derivable: they show again next launch if still unresolved.

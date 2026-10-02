@@ -143,10 +143,11 @@ Wave 6 — Desktop UI
 
 **Wave 6 gate: PASSED for everything a machine can check; manual run tagged
 `hw-verify-needed`.** `crates/desktop` renders through the real `egui` pass in
-`tests/ui_headless.rs` (11 tests: chrome + empty state, connected device panel,
+`tests/ui_headless.rs` (13 tests: chrome + empty state, connected device panel,
 Start-button gating, unauthorized help text, running job progress and controls,
 paused reason + Resume, completed summary, welcome wizard, ADB-not-found modal
-with all three routes, error banner, expanded history row). The architecture gate
+with all three routes, install progress modal + cancel, error banner, expanded
+history row). The architecture gate
 is *enforced*, not documented: `tests/architecture.rs` (4 tests) fails the build if
 the UI acquires `sha2`/`rusqlite`/`fs::rename` (backup logic), if `core` acquires
 `egui`/`eframe`/`rfd`, if a second `eframe::App` appears, or if the view stops
@@ -181,9 +182,44 @@ Decisions taken while building this wave:
   the directory is unusable. A failed log must never stop the app from starting.
 
 Wave 7 — ADB install & reliability
-- [ ] E07.1 Managed installer
-- [ ] E07.2 Unauthorized-mid-backup handling
-- [ ] E07.3 Reliability suite
+- [x] E07.1 Managed installer
+- [x] E07.2 Unauthorized-mid-backup handling
+- [x] E07.3 Reliability suite
+
+**Wave 7 gate: PASSED for everything a machine can check; the real download is
+tagged `hw-verify-needed`.** E07.1: `core::adb::installer` fetches Google's
+pinned `repository2-3.xml`, streams the archive, verifies the published digest
+*before* extracting, allow-list extracts only what adb needs, and swaps the
+result into `<data>/platform-tools` only after the new binary answers
+`adb version` (staging sibling + rename, so a crash or a cancel leaves the old
+installation untouched). The UI wiring is live: the `[Install automatically]`
+button starts a worker-thread install, a progress modal shows the stage, the byte
+count and a Cancel, and every failure returns to the choice modal with the reason
+inline plus the two routes that still work. E07.2 was already satisfied by the
+engine's pause path (`PauseReason::AuthorizationNeeded` on a transient error that
+`needs_authorization()`); `scenario_disconnect.rs` pins it end to end. E07.3: six
+scenario suites (23 tests) — disconnect/unauthorized, kill between rename and
+manifest write, duplicate names and overlapping selections, corrupt manifest,
+50,000 files under budget, and 10-version history.
+
+Decisions taken while building this wave:
+- **The installer is a trait in the UI layer** (`startup::AdbInstaller`), with
+  `ManagedInstaller` as the production implementation. The UI needs to render a
+  checksum mismatch, a full disk and a cancellation, and no test can provoke those
+  against `dl.google.com`; `testutil::ScriptedInstaller` scripts them instead.
+- **A failed or cancelled install writes nothing.** The config is only repointed
+  *after* the report comes back, so the worst case is the state the user was in
+  before they clicked.
+- **The progress modal stays up past the last byte** (“Checking that adb runs”):
+  the install is finished when `adb version` answers, not when the bytes land.
+- **`set_modal` exists beside `show_modal`.** `show_modal` suppresses a kind the
+  user dismissed (that is what stops the adb nag); a progress dialog is the
+  opposite case — the user just asked for it — so it is set explicitly.
+- **`VersionProbe` is `Send + Sync`.** The managed installer carries one and runs
+  on a worker thread; a probe is a pure function of a path, so this was free.
+- **A cancel is noticed on the next progress tick**, not pre-emptively: the
+  installer checks the callback's answer and returns `InstallError::Cancelled`
+  with its staging directory removed on the way out.
 
 Wave 8 — Release
 - [ ] E08.1 Windows artifact

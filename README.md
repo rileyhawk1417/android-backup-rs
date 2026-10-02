@@ -40,7 +40,7 @@ Requires a stable Rust toolchain.
 
 ```bash
 cargo run --release -p android-backup-desktop   # open the app
-cargo test --workspace                          # 347 tests
+cargo test --workspace                          # 410 tests
 cargo fmt --check && cargo clippy --workspace --all-targets
 ```
 
@@ -50,8 +50,11 @@ Windows). `ANDROID_BACKUP_LOG=debug` raises the log level; the log file is
 `logs/android-backup.log`.
 
 On first launch, pick a backup folder and point the app at `adb` if it is not on
-`PATH`. Then plug in a phone with USB debugging on, approve the prompt on the
-phone, choose the folders to back up, and press **Back up now**.
+`PATH` — or press **Install automatically**, which downloads Google's
+`platform-tools`, verifies it against the published checksum and only then swaps
+it in (nothing is replaced until the new `adb` runs). Then plug in a phone with
+USB debugging on, approve the prompt on the phone, choose the folders to back up,
+and press **Back up now**.
 
 ## License
 
