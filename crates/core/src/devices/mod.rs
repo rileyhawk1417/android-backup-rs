@@ -18,10 +18,12 @@
 //!   desktop app simply passes `Arc<Db>` (see `database::devices`).
 
 pub mod backup_gate;
+pub mod profile;
 pub mod state;
 pub mod watcher;
 
 pub use backup_gate::{check, check_watcher, GateError};
+pub use profile::{validate_display_name, validate_folder_path, ProfileError, ProfileService};
 pub use state::DeviceState;
 pub use watcher::{DeviceEvent, DeviceWatcher, WatcherConfig};
 
