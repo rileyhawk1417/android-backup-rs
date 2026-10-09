@@ -67,6 +67,36 @@ impl JobStatus {
     }
 }
 
+/// Who started a job (Wave 9).
+///
+/// The resume-on-reconnect rule (E09.2) resumes only jobs the automation
+/// started: work a person began stays theirs to finish. That rule is only
+/// sound if the origin is durable, which is why this is a column and not an
+/// in-memory set that a restart would lose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JobTrigger {
+    #[default]
+    Manual,
+    Auto,
+}
+
+impl JobTrigger {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Auto => "auto",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "manual" => Self::Manual,
+            "auto" => Self::Auto,
+            _ => return None,
+        })
+    }
+}
+
 /// A row of `backup_jobs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobRow {
@@ -81,6 +111,8 @@ pub struct JobRow {
     pub files_failed: i64,
     pub bytes_copied: i64,
     pub error_summary: Option<String>,
+    /// Whether a person or the automation started this job.
+    pub trigger: JobTrigger,
 }
 
 impl JobRow {
@@ -98,15 +130,28 @@ impl JobRow {
             files_failed: row.get("files_failed")?,
             bytes_copied: row.get("bytes_copied")?,
             error_summary: row.get("error_summary")?,
+            trigger: JobTrigger::parse(&row.get::<_, String>("trigger")?)
+                .unwrap_or(JobTrigger::Manual),
         })
     }
 }
 
-/// Create a job in `planning`.
+/// Create a job in `planning`, started by a person.
 pub fn insert_job(db: &Db, device_id: i64, now: &str) -> Result<i64, DbError> {
+    insert_job_as(db, device_id, now, JobTrigger::Manual)
+}
+
+/// Create a job in `planning`, recording who started it.
+pub fn insert_job_as(
+    db: &Db,
+    device_id: i64,
+    now: &str,
+    trigger: JobTrigger,
+) -> Result<i64, DbError> {
     db.conn().execute(
-        "INSERT INTO backup_jobs (device_id, started_at, status) VALUES (?1, ?2, 'planning')",
-        params![device_id, now],
+        "INSERT INTO backup_jobs (device_id, started_at, status, trigger)
+         VALUES (?1, ?2, 'planning', ?3)",
+        params![device_id, now, trigger.as_str()],
     )?;
     Ok(db.conn().last_insert_rowid())
 }
@@ -257,6 +302,40 @@ mod tests {
         devices::upsert_seen(db, "SER1", &Default::default(), "2026-01-01T00:00:00Z")
             .unwrap()
             .id
+    }
+
+    #[test]
+    fn a_job_records_who_started_it() {
+        let db = Db::open_in_memory().unwrap();
+        let device_id = device(&db);
+
+        // The existing entry point is the manual one, by definition.
+        let manual = insert_job(&db, device_id, "2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(
+            get_job(&db, manual).unwrap().unwrap().trigger,
+            JobTrigger::Manual
+        );
+
+        let auto = insert_job_as(&db, device_id, "2026-01-01T01:00:00Z", JobTrigger::Auto).unwrap();
+        assert_eq!(
+            get_job(&db, auto).unwrap().unwrap().trigger,
+            JobTrigger::Auto
+        );
+
+        // Both survive the round trip through history, newest first.
+        let rows = history(&db, device_id, 10).unwrap();
+        assert_eq!(rows[0].id, auto);
+        assert_eq!(rows[0].trigger, JobTrigger::Auto);
+        assert_eq!(rows[1].trigger, JobTrigger::Manual);
+    }
+
+    #[test]
+    fn trigger_strings_round_trip_and_unknown_values_do_not_panic() {
+        for trigger in [JobTrigger::Manual, JobTrigger::Auto] {
+            assert_eq!(JobTrigger::parse(trigger.as_str()), Some(trigger));
+        }
+        assert_eq!(JobTrigger::parse("something-else"), None);
+        assert_eq!(JobTrigger::default(), JobTrigger::Manual);
     }
 
     #[test]

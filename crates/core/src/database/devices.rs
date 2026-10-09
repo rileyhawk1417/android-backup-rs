@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, OptionalExtension, Row};
 
 use crate::adb::props::DeviceProps;
+use crate::automation::Schedule;
 use crate::clock;
 
 use super::{Db, DbError};
@@ -32,6 +33,9 @@ pub struct DeviceRow {
     pub model: Option<String>,
     pub android_version: Option<String>,
     pub destination_path: Option<PathBuf>,
+    /// When automatic backups run for this device (Wave 9). `Off` — the
+    /// default — means automation never touches it.
+    pub auto_schedule: Schedule,
     pub created_at: String,
     pub last_seen_at: String,
 }
@@ -47,10 +51,25 @@ impl DeviceRow {
             model: row.get("model")?,
             android_version: row.get("android_version")?,
             destination_path: destination.map(PathBuf::from),
+            auto_schedule: schedule_from_row(row)?,
             created_at: row.get("created_at")?,
             last_seen_at: row.get("last_seen_at")?,
         })
     }
+}
+
+/// Rebuild a [`Schedule`] from the manifest's two columns.
+///
+/// A kind we do not recognise, or `every_hours` with no usable number, reads as
+/// [`Schedule::Off`]: a stored value that cannot be understood must never
+/// *enable* automation.
+fn schedule_from_row(row: &Row<'_>) -> rusqlite::Result<Schedule> {
+    let kind: String = row.get("auto_schedule_kind")?;
+    let hours: Option<i64> = row.get("auto_schedule_hours")?;
+    Ok(Schedule::parse(
+        &kind,
+        hours.and_then(|h| u32::try_from(h).ok()),
+    ))
 }
 
 /// Compose the automatic display name for a device.
@@ -125,6 +144,30 @@ pub fn list(db: &Db) -> Result<Vec<DeviceRow>, DbError> {
     let mut stmt = conn.prepare("SELECT * FROM devices ORDER BY last_seen_at DESC, id ASC")?;
     let rows = stmt.query_map([], DeviceRow::from_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Set when automatic backups run for one device (Wave 9).
+///
+/// This is the user's standing consent, so it is stored with the profile rather
+/// than in the config file: it belongs to the device, not to the machine. The
+/// global default only ever *seeds* this value.
+pub fn set_auto_schedule(db: &Db, device_id: i64, schedule: Schedule) -> Result<(), DbError> {
+    let schedule = schedule.clamped();
+    let affected = db.conn().execute(
+        "UPDATE devices SET auto_schedule_kind = ?2, auto_schedule_hours = ?3 WHERE id = ?1",
+        params![
+            device_id,
+            schedule.as_str(),
+            schedule.hours().map(i64::from)
+        ],
+    )?;
+    if affected == 0 {
+        return Err(DbError::NotFound {
+            what: "device",
+            key: device_id.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Rename a device. Only `display_name` changes: identity and history stay put.
@@ -326,6 +369,64 @@ mod tests {
             product: Some("a53x".into()),
             android_version: Some("14".into()),
         }
+    }
+
+    #[test]
+    fn a_new_device_is_not_auto_enrolled() {
+        let db = Db::open_in_memory().unwrap();
+        let device = upsert_seen(&db, "SER1", &sample_props(), "2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(device.auto_schedule, Schedule::Off, "automation is opt-in");
+    }
+
+    #[test]
+    fn the_auto_schedule_survives_a_reload_and_an_upsert() {
+        let db = Db::open_in_memory().unwrap();
+        let device = upsert_seen(&db, "SER1", &sample_props(), "2026-01-01T00:00:00Z").unwrap();
+        set_auto_schedule(&db, device.id, Schedule::EveryHours(6)).unwrap();
+
+        // Re-seeing the phone (a later poll, a reconnect) must not reset intent.
+        let again = upsert_seen(&db, "SER1", &sample_props(), "2026-01-02T00:00:00Z").unwrap();
+        assert_eq!(again.auto_schedule, Schedule::EveryHours(6));
+        assert_eq!(
+            get_by_id(&db, device.id).unwrap().unwrap().auto_schedule,
+            Schedule::EveryHours(6)
+        );
+
+        // Switching mode drops the stale interval rather than leaving it behind.
+        set_auto_schedule(&db, device.id, Schedule::OnConnect).unwrap();
+        let switched = get_by_serial(&db, "SER1").unwrap().unwrap();
+        assert_eq!(switched.auto_schedule, Schedule::OnConnect);
+        assert_eq!(switched.auto_schedule.hours(), None);
+
+        // And an out-of-range interval never reaches the row unclamped.
+        set_auto_schedule(&db, device.id, Schedule::EveryHours(100_000)).unwrap();
+        assert_eq!(
+            get_by_id(&db, device.id).unwrap().unwrap().auto_schedule,
+            Schedule::EveryHours(crate::automation::MAX_INTERVAL_HOURS)
+        );
+    }
+
+    #[test]
+    fn a_row_we_cannot_read_does_not_enable_automation() {
+        let db = Db::open_in_memory().unwrap();
+        let device = upsert_seen(&db, "SER1", &sample_props(), "2026-01-01T00:00:00Z").unwrap();
+        db.conn()
+            .execute(
+                "UPDATE devices SET auto_schedule_kind = 'from_the_future', auto_schedule_hours = 6
+                 WHERE id = ?1",
+                params![device.id],
+            )
+            .unwrap();
+        assert_eq!(
+            get_by_id(&db, device.id).unwrap().unwrap().auto_schedule,
+            Schedule::Off
+        );
+    }
+
+    #[test]
+    fn setting_the_auto_schedule_on_a_missing_device_is_an_error() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(set_auto_schedule(&db, 12345, Schedule::OnConnect).is_err());
     }
 
     #[test]

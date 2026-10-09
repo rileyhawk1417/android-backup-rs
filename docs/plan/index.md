@@ -302,7 +302,7 @@ Decisions taken while building this wave:
 > jobs the automation itself started (`trigger = auto`); a user-started paused
 > job keeps waiting for its Resume click.
 
-- [ ] E09.1 Schedule model
+- [x] E09.1 Schedule model
 - [ ] E09.2 Auto-backup on connection
 - [ ] E09.3 Interval scheduler driver
 - [ ] E09.4 OS notifications

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::automation::Schedule;
 use crate::clock;
 use crate::paths::PathError;
 
@@ -31,6 +32,17 @@ pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 4;
 const CONFIG_FILE_NAME: &str = "config.toml";
 const APP_DIR_NAME: &str = "android-backup";
 
+/// Automation defaults (Wave 9).
+///
+/// Per-device intent lives in the manifest (`devices.auto_backup`); this is only
+/// the schedule a *new* device is offered, so a hand-edited file can never
+/// enrol a device behind the user's back.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AutomationConfig {
+    #[serde(default)]
+    pub default_schedule: Schedule,
+}
+
 /// Everything the application needs to know, persisted as TOML.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -46,6 +58,9 @@ pub struct AppConfig {
     /// Directory where managed platform-tools are extracted.
     #[serde(default)]
     pub managed_adb_dir: Option<PathBuf>,
+    /// Automation defaults; missing in a 0.1.0 file, hence the serde default.
+    #[serde(default)]
+    pub automation: AutomationConfig,
 }
 
 fn default_config_version() -> u32 {
@@ -64,6 +79,7 @@ impl Default for AppConfig {
             global_backup_dir: None,
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             managed_adb_dir: None,
+            automation: AutomationConfig::default(),
         }
     }
 }
@@ -190,6 +206,7 @@ impl AppConfig {
         if self.config_version == 0 {
             self.config_version = CONFIG_VERSION;
         }
+        self.automation.default_schedule = self.automation.default_schedule.clamped();
     }
 
     /// Effective poll interval as a duration.
@@ -219,10 +236,67 @@ mod tests {
             global_backup_dir: Some(PathBuf::from("/mnt/backups")),
             poll_interval_secs: 9,
             managed_adb_dir: Some(PathBuf::from("/data/pt")),
+            automation: AutomationConfig {
+                default_schedule: Schedule::EveryHours(6),
+            },
         };
         cfg.save(&path).unwrap();
         let loaded = AppConfig::load(&path);
         assert_eq!(loaded, cfg);
+    }
+
+    #[test]
+    fn a_0_1_0_config_file_loads_unchanged_with_automation_off() {
+        // Verbatim what the previous release wrote: no `[automation]` section.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "config_version = 1\npoll_interval_secs = 4\n\n[adb_mode]\nmode = \"system\"\n",
+        )
+        .unwrap();
+        let cfg = AppConfig::load(&path);
+        assert_eq!(cfg.automation.default_schedule, Schedule::Off);
+        assert_eq!(cfg.adb_mode, AdbMode::System);
+        assert_eq!(cfg.poll_interval_secs, 4);
+    }
+
+    #[test]
+    fn automation_schedule_round_trips_and_is_clamped_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[automation]\ndefault_schedule = { mode = \"every_hours\", hours = 6 }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            AppConfig::load(&path).automation.default_schedule,
+            Schedule::EveryHours(6)
+        );
+
+        // A hand-edited out-of-range interval is clamped, never saved back
+        // verbatim, so the settings UI can always represent what it reads.
+        std::fs::write(
+            &path,
+            "[automation]\ndefault_schedule = { mode = \"every_hours\", hours = 100000 }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            AppConfig::load(&path).automation.default_schedule,
+            Schedule::EveryHours(crate::automation::MAX_INTERVAL_HOURS)
+        );
+
+        // `on_connect` has no `hours` to carry.
+        std::fs::write(
+            &path,
+            "[automation]\ndefault_schedule = { mode = \"on_connect\" }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            AppConfig::load(&path).automation.default_schedule,
+            Schedule::OnConnect
+        );
     }
 
     #[test]
@@ -257,6 +331,7 @@ mod tests {
         assert_eq!(cfg.poll_interval_secs, 7);
         assert_eq!(cfg.adb_mode, AdbMode::Managed);
         assert_eq!(cfg.config_version, CONFIG_VERSION);
+        assert_eq!(cfg.automation, AutomationConfig::default());
     }
 
     #[test]

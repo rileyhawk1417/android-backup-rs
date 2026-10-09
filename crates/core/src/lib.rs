@@ -30,6 +30,7 @@
 #![forbid(unsafe_code)]
 
 pub mod adb;
+pub mod automation;
 pub mod backup;
 pub mod clock;
 pub mod config;

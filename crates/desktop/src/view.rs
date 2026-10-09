@@ -953,8 +953,9 @@ mod tests {
     use super::*;
     use android_backup_core::adb::parse::RawState;
     use android_backup_core::adb::props::DeviceProps;
+    use android_backup_core::automation::Schedule;
     use android_backup_core::backup::Reason;
-    use android_backup_core::database::jobs::JobCounters;
+    use android_backup_core::database::jobs::{JobCounters, JobTrigger};
 
     fn info(serial: &str, state: DeviceState, model: Option<&str>) -> Arc<DeviceInfo> {
         Arc::new(DeviceInfo {
@@ -983,6 +984,7 @@ mod tests {
             model: Some("SM-A536B".to_string()),
             android_version: Some("14".to_string()),
             destination_path: None,
+            auto_schedule: Schedule::Off,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             last_seen_at: "2026-01-01T00:00:00Z".to_string(),
         }
@@ -1271,6 +1273,7 @@ mod tests {
             model: Some("Pixel 8".to_string()),
             android_version: Some("14".to_string()),
             destination_path: Some("/backups/pixel".into()),
+            auto_schedule: Schedule::Off,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             last_seen_at: "2026-01-01T00:00:00Z".to_string(),
         });
@@ -1392,6 +1395,7 @@ mod tests {
             files_failed: 2,
             bytes_copied: 1_073_741_824,
             error_summary: None,
+            trigger: JobTrigger::Manual,
         };
         assert_eq!(
             last_backup_summary(&row),

@@ -68,15 +68,22 @@ Rules that hold across the whole wave:
      device's last *successful or attempted* job start (attempted, not
      completed: a failing backup must not retry itself into an infinite loop).
 2. Config: `AppConfig` gains `automation: AutomationConfig { default_schedule }`
-   — a global default the per-device profile flag can inherit or override.
+   — the machine-level default that *seeds* a device's own setting (the wizard
+   checkbox, the settings panel's starting value). It is a default, not a
+   second switch: once a device has a schedule of its own, that is the truth.
    Config version stays 1 with `#[serde(default)]` on the new field; old
    config.toml files must load unchanged (add one round-trip test proving it).
-3. Per-device flag lives with the **profile** (it is per-device user intent, and
-   the manifest already owns profile rows): migration to version 2 adds
-   `auto_backup` to the device row, default off, **and** `trigger` to the jobs
-   table (`manual` | `auto`, default `manual` for existing rows — history must
-   not retroactively claim the machine did work a person did). Migration tests
-   prove a v1 database upgrades in place with all rows kept.
+3. Per-device setting lives with the **profile** (it is per-device user intent,
+   and the manifest already owns profile rows): migration to version 2 adds
+   `auto_schedule_kind` (`off` | `on_connect` | `every_hours`) and
+   `auto_schedule_hours` to the device row, defaulting to `off`, **and**
+   `trigger` to the jobs table (`manual` | `auto`, default `manual` for existing
+   rows — history must not retroactively claim the machine did work a person
+   did). Migration tests prove a v1 database upgrades in place with all rows
+   kept. The stored form is the schedule itself, not an "enabled" boolean: a
+   flag plus a separate interval is two sources of truth for one decision, and
+   such a row can say "on" with nothing to run on. A kind or interval that
+   cannot be read means `off` — bad data may only ever *disable* automation.
 4. `next_due(last_run, schedule, now) -> Option<Instant>` for the UI ("next
    automatic backup in 2 h 05 m") — pure, fuzz-free but property-tested for
    monotonicity (`now` advancing never moves the answer backwards).
@@ -291,8 +298,9 @@ Rules that hold across the whole wave:
 
 **Actions**
 1. Device detail panel: an **"Automatically back up when…"** control — Off /
-   On connection / Every N hours (`N` editable, sane bounds 1–72, persisted on
-   change with the profile).
+   On connection / Every N hours (`N` editable, sane bounds 1–72) — persisted on
+   change with the profile (`devices.auto_schedule_kind` / `_hours`, the pair
+   E09.1 added; the config's `default_schedule` only pre-selects it).
 2. The schedule line says the truth about what will happen ("Next automatic
    start in 2 h 05 m" / "starts when <Device Name> is connected" / "automatic
    backup is off"), including *why nothing is scheduled* when the gate would

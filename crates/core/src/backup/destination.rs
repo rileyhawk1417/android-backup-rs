@@ -287,6 +287,7 @@ mod tests {
             model: None,
             android_version: None,
             destination_path: destination.map(PathBuf::from),
+            auto_schedule: crate::automation::Schedule::Off,
             created_at: "2026-01-01T00:00:00Z".into(),
             last_seen_at: "2026-01-01T00:00:00Z".into(),
         }

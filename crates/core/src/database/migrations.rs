@@ -17,7 +17,10 @@ use super::DbError;
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
 
 /// `(version, sql)` in ascending version order. Append-only.
-const MIGRATIONS: &[(u32, &str)] = &[(1, include_str!("migrations/v1.sql"))];
+const MIGRATIONS: &[(u32, &str)] = &[
+    (1, include_str!("migrations/v1.sql")),
+    (2, include_str!("migrations/v2.sql")),
+];
 
 /// Read `PRAGMA user_version`.
 pub fn user_version(conn: &Connection) -> Result<u32, DbError> {
@@ -108,6 +111,41 @@ mod tests {
             let result = thread.join().unwrap();
             assert_eq!(result.unwrap().unwrap(), SCHEMA_VERSION);
         }
+    }
+
+    #[test]
+    fn a_v1_database_upgrades_in_place_and_keeps_its_rows() {
+        // Build a v1 database by hand: exactly what a 0.1.0 install has on disk.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0].1).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute_batch(
+            "INSERT INTO devices (id, serial, display_name, created_at, last_seen_at)
+                 VALUES (7, 'SER7', 'Pixel 8', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+             INSERT INTO backup_jobs (id, device_id, started_at, status)
+                 VALUES (3, 7, '2026-01-01T00:00:00Z', 'completed');",
+        )
+        .unwrap();
+
+        assert_eq!(apply(&mut conn).unwrap(), SCHEMA_VERSION);
+
+        // Rows survive, and the new columns take their defaults: no device is
+        // auto-enrolled by an upgrade, and no historical job is relabelled as
+        // the machine's work.
+        let (kind, hours, trigger): (String, Option<i64>, String) = conn
+            .query_row(
+                "SELECT d.auto_schedule_kind, d.auto_schedule_hours, j.trigger FROM devices d
+                 JOIN backup_jobs j ON j.device_id = d.id WHERE d.id = 7",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, "off");
+        assert_eq!(hours, None);
+        assert_eq!(trigger, "manual");
+
+        // Running again is a no-op, as it is on every app start.
+        assert_eq!(apply(&mut conn).unwrap(), SCHEMA_VERSION);
     }
 
     #[test]
