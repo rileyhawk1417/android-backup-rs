@@ -36,6 +36,7 @@ Managed ADB download/install blocks nothing on this path — hence Wave 7.
 | 6 | [wave-6-desktop-ui.md](wave-6-desktop-ui.md) | release | manual app run via mock + device |
 | 7 | [wave-7-install-reliability.md](wave-7-install-reliability.md) | release | installer E2E + reliability suite |
 | 8 | [wave-8-release.md](wave-8-release.md) | — | MVP acceptance run |
+| 9 | [wave-9-automation.md](wave-9-automation.md) | — | 0.2.0 release |
 
 ## Progress tracker
 
@@ -290,6 +291,31 @@ Decisions taken while building this wave:
   instead — a per-release record with its own evidence, which `testing.md` §5 and
   `release.md` both link — because the answer to "is the product done" is not the
   same table as "which suites run".
+
+## Wave 9 — Automation
+
+> Scope confirmed with the maintainer: scheduling + auto-backup on connection
+> are the must-haves; background = tray-resident app (no daemon); **Windows is
+> the primary target** (Linux tray is best-effort); restore is **explicitly
+> out** — the app stays one-way (phone → PC), restore is only noted in the wave
+> doc's deferred section. Interrupted backups **resume on reconnect**, but only
+> jobs the automation itself started (`trigger = auto`); a user-started paused
+> job keeps waiting for its Resume click.
+
+- [ ] E09.1 Schedule model
+- [ ] E09.2 Auto-backup on connection
+- [ ] E09.3 Interval scheduler driver
+- [ ] E09.4 OS notifications
+- [ ] E09.5 System tray & close-to-tray
+- [ ] E09.6 Settings & status UI
+- [ ] E09.7 Docs, packaging, release (wave gate)
+
+**Standing rules for this wave (from wave-9-automation.md):** one attempt per
+trigger and one notification per connection episode, the gate decides exactly
+as it does for the Start button, `DeviceBusy` is silence (the manual user
+wins), automation is off by default and opt-in per device, and jobs record
+`trigger = manual | auto` so the resume-on-reconnect rule can never touch work
+the user started by hand.
 
 ## References
 
