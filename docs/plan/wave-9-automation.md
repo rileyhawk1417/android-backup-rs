@@ -101,46 +101,82 @@ Rules that hold across the whole wave:
   with and without the new field; migration v1→v2 keeps rows and adds the
   default; monotonicity property.
 
-## E09.2 Auto-backup on connection (core)
+## E09.2 Auto-backup on connection (core) — **implemented**
+
+**Where it lives:** `core::automation::policy`. The decision function is pure:
+everything it may touch is behind the `Host` trait (`schedule`, `last_attempt`,
+`paused_job`, `start`, `resume`), which the app implements over the manifest,
+the gate and the job pipeline. One consequence, and the reason the trait
+exists: **the whole rulebook is tested against a scripted timeline with no
+database, no phone, no running job and no thread** — the tests in that module
+are the *Accept* list below, spelled out one scenario each.
 
 **Actions**
-1. New module `core::automation::policy` — a `DeviceSink` (or a plain
-   subscriber to the watcher) that turns **`DeviceEvent::Connected` /
-   `FirstSeen` into ready state** into an *attempt*:
-   - Ask the profile: is auto-backup on for this serial? Off → nothing, ever.
-   - Ask the gate (E03.5 / `backup_gate`): is the device actually usable
-     (authorized, has a valid destination, has selected folders)? A failure of
-     the gate is *reported once per connection episode*, then silent until the
-     state changes again — use the episode boundary (a `Disconnected`/new
-     `Connected` pair) to re-arm the one-shot notification.
-   - The schedule decides whether this connection is *due* (`OnConnect` is due
-     immediately; `EveryHours` is not, unless the time has really passed).
-2. The attempt goes through `BackupController::start` exactly like the button:
-   `DeviceBusy` → give up silently (a manual job is running; automation must
-   not cancel, not queue, not notify — the user is already looking at it).
-   Any other start error → the one notification for this episode.
-3. **Cooldown on flaky connectivity:** an attempt that begins within M seconds
-   of the previous attempt *for the same serial* that failed for an
-   infrastructure reason is skipped (the cable flap loop: connect → start →
-   fail → disconnect → reconnect …). Cooldown is per-device, resets on a
-   successful start.
+1. `Policy::on_event(&dyn Host, &DeviceEvent, now) -> Vec<Note>` turns
+   **`FirstSeen` / `Connected` / `Unauthorized` "became ready" events** into at
+   most one *attempt*. `Policy::tick` does the same for the clock (E09.3), and
+   only for devices that really are `Connected`:
+   - The device's own schedule decides, first thing (E09.1's per-device
+     `Schedule`): `Off` → nothing, ever — not even the resume rule. One switch,
+     one meaning. A serial the host does not know answers `Off`, so an
+     unenrolled phone is untouched by construction.
+   - The gate is asked through `Host::start`/`Host::resume`, i.e. *the attempt
+     itself is gate-checked*, exactly as the Start button is. The policy never
+     inspects readiness on its own; a refusal comes back as
+     `AttemptError::NotReady(<the gate's words>)` and is *reported once per
+     connection episode*, then silent until the state changes again — the
+     episode boundary (a `Disconnected` / new `FirstSeen` pair) re-arms the
+     one-shot explanation.
+   - The schedule decides whether this connection is *due*: `OnConnect` is due
+     immediately; `EveryHours` is not, unless the time has really passed. The
+     manifest's last job row — whoever started it — is the clock, so a manual
+     backup five minutes ago also satisfies "every six hours".
+2. The attempt goes through the same entry point as the button. The three
+   answers are deliberately distinct, because they want three different
+   reactions:
+   - `Busy` → silence: a manual job is running, and automation must not cancel,
+     not queue, not notify — the user is already looking at it. For
+     `OnConnect` this also *consumes* the plug-in's run: the user's own backup
+     **is** "backed up when I plug in", so automation does not come back later
+     with a second one.
+   - `NotReady(reason)` → one `Note::Blocked` per episode and **no cooldown**:
+     nothing was attempted, and the user allowing USB debugging or plugging in
+     the destination drive has to take effect immediately, not two minutes
+     later.
+   - `Failed(reason)` → one `Note::Failed` per episode, plus the cooldown below.
+3. **Cooldown on flaky connectivity:** an attempt that begins within
+   `FAILURE_COOLDOWN` (120 s) of the previous **failed** attempt for the same
+   serial is skipped. That is the cable flap loop (connect → start → fail →
+   disconnect → reconnect …) made cheap: the flapping produces no retries and,
+   because explanations are rate-limited too, no notification loop. The clock is
+   per device and *survives the unplug* — a cooldown that reset with the
+   appearance would never apply to the one case it exists for. It clears on a
+   successful start, and a separate `MAX_ATTEMPTS_PER_APPEARANCE` (3) budget
+   stops a device that stays plugged in and broken from being retried forever.
+   (Notifications are limited independently by `EXPLANATION_INTERVAL`, because a
+   phone flapping between unauthorized and connected re-appears every few
+   seconds and each appearance would otherwise be entitled to its own
+   explanation.)
 4. **Reconnect handling — the resume rule.** When a device becomes ready and a
    job for it is sitting **paused**, a reconnect is a *resume*, not a new job:
-   - **job `trigger = auto`** → the automation calls `resume()` (after the same
-     gate check). This counts as the attempt for this connection episode: no
-     second job row, no `DeviceBusy` no-op. A notification says so
-     ("Resuming <Device> — continuing where it stopped"), so it is not silent.
-   - **job `trigger = manual`** → stay out. The user pressed Start and then the
-     cable came out; the panel's Resume button is still theirs to press. A
-     user-owned job that the automation silently drove to completion would be
-     exactly the surprise rule 3 exists to prevent.
+   - **job `trigger = auto`** → the automation calls `resume()`, which is itself
+     gate-checked. This counts as the attempt for this connection episode: no
+     second job row, no `Busy` no-op. A notification says so ("Resuming
+     <Device> — continuing where it stopped"), so it is not silent.
+   - **job `trigger = manual`** → stay out, silently. The user pressed Start and
+     then the cable came out; the panel's Resume button is still theirs to
+     press. A user-owned job that the automation silently drove to completion
+     would be exactly the surprise rule 3 exists to prevent.
    - Either way the engine's pause semantics are untouched — the control API is
      still the only thing that resumes anything; the automation is just a
      caller that has been granted standing for its own jobs.
    - **Bounded, so a bad cable cannot loop:** resumes obey the same cooldown as
-     starts, and a job that re-pauses twice for infrastructure reasons within
-     one connection episode stops being auto-resumed — it raises a
-     "needs your attention" notification and waits for the user.
+     starts, and a job that re-pauses `MAX_RESUMES_PER_JOB` (2) times stops being
+     auto-resumed: it raises one `Note::NeedsAttention` and waits for the user.
+     **The budget is per *job*, not per connection episode** — the reconnects
+     that break a job are exactly what ends an episode, so an episode-scoped
+     count would reset itself and loop forever. A different paused job starts
+     with a fresh budget.
    - No extra setting for this: resume-on-reconnect is on exactly when the
      device's auto-backup is on. Auto-backup off means nothing automatic at all,
      including this.
@@ -148,28 +184,51 @@ Rules that hold across the whole wave:
 **Pitfalls**
 - The watcher emits events inside its own thread; never call `start` (which
   takes locks) inline in a way that could deadlock with the poll loop — hand
-  the attempt to a short-lived worker or a queue, the way the UI does.
+  the attempt to a short-lived worker or a queue, the way the UI does. That is a
+  constraint on the `Host` implementation, so it is written into the trait's doc
+  comment, where the implementor will read it.
 - Do not treat `FirstSeen` as consent: a phone that is *seen* while
   unauthorized must never become a job that sits paused with no user watching.
   Gate-check first, attempt second.
 - Keep the policy object free of device *rows* (serials only), so it can be
-  tested against a watcher timeline without a database.
+  tested against a watcher timeline without a database. It holds counters, a
+  per-job resume budget and two timestamps; an entry is dropped when a device
+  unplugs with nothing left that has to outlive the unplug.
+- A stored timestamp that lands in the *future* — a laptop whose clock was wrong
+  and has since been corrected — must read as "just now", never as "never ran",
+  or a clock skew becomes a backup on every tick. `Schedule`'s saturating
+  arithmetic is where that is handled, which is why `Host::last_attempt` hands
+  back an `Instant` and not an age: it keeps "a moment ago" and "an hour from
+  now" distinguishable.
 
-**Accept**
-- A scripted watcher timeline test (same style as
-  `crates/core/src/devices/watcher.rs`'s scripted-thread test): connect →
-  auto job starts; unauthorized connect → one notification, zero jobs, nothing
-  re-fires until disconnect/reconnect; flaky-cable timeline → one attempt in
-  the window, not eleven; manual job live → busy, silent, no interference;
-  auto flag off → the whole module is inert.
-- Resume tests (the rule above, each as one scenario): pull the cable mid-copy
-  from an **auto** job → paused; reconnect → the same job resumes, the
-  manifest still shows one job row, and the already-verified files are not
-  copied again (assert on the mock remote's read counts, not on the status
-  text); the same timeline with a **manual** job → nothing happens until the
-  user presses Resume; an auto job that re-pauses twice in one episode → the
-  third reconnect is silent and a "needs your attention" notification is the
-  only output.
+**Accept** — all green in `policy`'s own test module, each line one scenario,
+driven by a `FakeHost` that is honest about what a real host does (a successful
+start moves the manifest clock, a successful resume un-pauses its job):
+- Connect → one automatic job; the next fifty ticks are silent; re-plug → a
+  second run. `OnConnect` means once per plug-in, not once per tick.
+- Unauthorized connect → one explanation, zero jobs, nothing re-fires until the
+  user allows it — and then the backup the refused attempt never consumed
+  happens at once.
+- Flaky-cable timeline → one attempt in the window, not eleven; a device that
+  stays broken gets three attempts per plug-in and then stops; a phone that
+  flaps while unauthorized explains itself once, not once per flap.
+- Manual job live → busy, silent, not queued behind. A paused *manual* job →
+  never touched. A paused *auto* job → the same job resumes (assert: the control
+  API was called and no start was attempted).
+- An auto job that re-pauses twice → the third reconnect only raises "needs your
+  attention", exactly once. A different job id gets a fresh budget.
+- Auto off / unknown serial → the whole module is inert. A repeated `Connected`
+  event, a `PollFailed` or a `StateChanged` one changes nothing. A timestamp in
+  the future schedules nothing until the clock catches up.
+
+**Left to the wiring (E09.3 / E09.5)** — so this task's accept is not complete
+until those land:
+- The `Host` implementation itself (`AppHost` over the manifest + the gate +
+  `BackupController`), including the "hand it to a worker, never block the
+  watcher thread" rule above.
+- The end-to-end assertion that a resumed job copies *only* the remainder. The
+  policy test can only assert that `resume` was called; the mock remote's read
+  counts belong to an integration test next to the existing resume tests.
 
 ## E09.3 Interval scheduler driver (core)
 

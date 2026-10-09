@@ -303,7 +303,11 @@ Decisions taken while building this wave:
 > job keeps waiting for its Resume click.
 
 - [x] E09.1 Schedule model
-- [ ] E09.2 Auto-backup on connection
+- [x] E09.2 Auto-backup on connection — `core::automation::policy`, the whole
+      rulebook behind a `Host` port, tested against a scripted timeline. The
+      `Host` implementation over the manifest + gate + controller, and the
+      "a resumed job copies only the remainder" integration test, land with the
+      E09.3/E09.5 wiring (see the wave doc's "Left to the wiring").
 - [ ] E09.3 Interval scheduler driver
 - [ ] E09.4 OS notifications
 - [ ] E09.5 System tray & close-to-tray
