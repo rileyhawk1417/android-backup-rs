@@ -410,7 +410,37 @@ Autostart lives in `desktop::autostart` (Windows Run key via `reg.exe`, Linux
 - Architecture test extended: tray/events code touches no `rusqlite`, no
   hashing — same wall that keeps the UI logic-free.
 
-## E09.6 Settings & status UI (desktop)
+## E09.6 Settings & status UI (desktop) — **implemented**
+
+**What landed.** The panel's schedule row is the single place a device's automation
+is decided (Off / On connection / Every N hours, 1–72, `DragValue` + radio rows), and it
+persists through `ProfileService::set_auto_schedule` on the click — no Save button, no
+unsaved state. The status line is a pure function of the manifest row, the clock and
+the pause flag (`view::auto_status_line`), so "Next automatic backup in 2 h 05 m",
+"starts when … is connected", "an automatic backup is due now" and "automatic backups
+are paused" are testable strings rather than a screenshot. The wizard's checkbox writes
+`default_schedule` *and* pushes it into the running watcher's sink, so a phone
+discovered after the box is ticked — by a watcher spawned before it — is enrolled;
+only rows that do not exist yet ever hear that answer, so a device the user later
+turns off stays off.
+
+A **Background** dialog (the status bar's button) is the second half of the settings,
+and the only part of the window that is about the application rather than a device:
+whether closing hides the window or quits, whether the program starts at login, and a
+**Quit now** button. The quit button is not decoration — with a tray icon the window's
+own close button hides instead of quitting, so without it the tray menu would be the
+only way out of the program, which is not something to ask of a user who has just
+turned automation off. The dialog reports what the *desktop* did about the login entry
+(`run at login: enabled` / `could not be changed (…)` / `not available (…)`) rather than
+what was asked for, keeps the user's wish in the configuration when the machine refuses
+it, and distinguishes "no tray on this desktop" from "turned off in the configuration
+file" instead of blaming the desktop for a setting.
+
+**One decision worth recording.**
+- **"Away" is not "blocked".** An unplugged device with a schedule is a *waiting*
+  state, so the line says when it will next run rather than inventing a fault to
+  fix; only a gate that actually refuses (unauthorized, no destination, paused)
+  speaks up with the gate's own words.
 
 **Actions**
 1. Device detail panel: an **"Automatically back up when…"** control — Off /

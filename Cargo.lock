@@ -95,6 +95,7 @@ dependencies = [
  "dirs",
  "eframe",
  "egui",
+ "libloading 0.8.9",
  "notify-rust",
  "rfd",
  "tempfile",

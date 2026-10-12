@@ -318,9 +318,51 @@ pub trait TrayHandle {
 /// tray icon, and the application then behaves as it did before Wave 9 — closing
 /// the window quits — rather than hiding itself where nobody can reach it.
 pub fn spawn(wiring: Wiring) -> Result<Box<dyn TrayHandle>, String> {
+    indicator_library()?;
     NativeTray::create(wiring)
         .map(|tray| Box::new(tray) as Box<dyn TrayHandle>)
         .map_err(|err| err.to_string())
+}
+
+/// The Linux indicator library, loaded **before** the tray is built.
+///
+/// [`spawn`] is a documented best-effort path, but on Linux the library that makes
+/// an appindicator is loaded lazily by the tray crate, and its first use *panics*
+/// when it is missing — it does not return an error for the caller to log. So the
+/// answer has to be known first: a desktop with GTK but no appindicator (a minimal
+/// GNOME, a bare window manager) then gets no tray icon and keeps working, instead of
+/// a process that dies the moment it tries to make one.
+#[cfg(target_os = "linux")]
+fn indicator_library() -> Result<(), String> {
+    for name in LIBS {
+        if can_load(name) {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "this desktop has no appindicator library ({}); install libayatana-appindicator3-1 \
+         to get a tray icon — the application runs without one",
+        LIBS.join(" or ")
+    ))
+}
+
+/// Sonames, in the order the tray crate itself tries them.
+#[cfg(target_os = "linux")]
+const LIBS: [&str; 2] = ["libayatana-appindicator3.so.1", "libappindicator3.so.1"];
+
+/// Whether the dynamic loader can find a library by name — the same question the
+/// tray crate asks, asked in a way that answers instead of dying.
+#[cfg(target_os = "linux")]
+fn can_load(name: &str) -> bool {
+    // SAFETY: nothing is called through the handle. It is dropped immediately, which
+    // is exactly what the loader expects of a caller who only wanted to know.
+    unsafe { libloading::Library::new(name) }.is_ok()
+}
+
+/// Windows and macOS reach the shell directly; there is nothing to check for.
+#[cfg(not(target_os = "linux"))]
+fn indicator_library() -> Result<(), String> {
+    Ok(())
 }
 
 /// Everything the tray builder needs from the application.
@@ -497,6 +539,26 @@ mod tests {
     use std::time::Duration;
 
     use crate::view::{JobView, ViewState};
+
+    /// The check that stands between a bare GNOME and a process that dies while
+    /// building its tray icon. It has to answer, not guess: a name that is not there
+    /// must come back `false`, and one that is (on a machine that has it) `true`.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_indicator_probe_answers_rather_than_assuming() {
+        assert!(
+            !can_load("libdefinitely-not-installed-4f3a.so.9"),
+            "a missing library must not look present"
+        );
+        // Either the machine has an appindicator (the tray works) or it does not (the
+        // tray is skipped); both are outcomes this function is allowed to report.
+        let found: Vec<&str> = LIBS.iter().copied().filter(|name| can_load(name)).collect();
+        assert_eq!(
+            indicator_library().is_ok(),
+            !found.is_empty(),
+            "the verdict and the probe disagree about {LIBS:?}"
+        );
+    }
 
     /// A view holding exactly one job, which is all the tray state depends on: the
     /// tray reads jobs and nothing else.

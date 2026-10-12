@@ -8,6 +8,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::automation::Schedule;
 use crate::database::devices::{self, DeviceRow, FolderRow};
 use crate::database::{Db, DbError};
 use crate::paths::{PathError, RelPath};
@@ -219,6 +220,21 @@ impl ProfileService {
         Ok(())
     }
 
+    /// When this device backs itself up (Wave 9, E09.6).
+    ///
+    /// The interval is clamped here rather than trusted from the panel: the rule
+    /// lives with the model, so a UI slip cannot store a schedule the engine's own
+    /// bounds would reject.
+    pub fn set_auto_schedule(
+        &self,
+        device_id: i64,
+        schedule: Schedule,
+    ) -> Result<Schedule, ProfileError> {
+        let clamped = schedule.clamped();
+        devices::set_auto_schedule(&self.db, device_id, clamped)?;
+        Ok(clamped)
+    }
+
     /// All profiles, for destination disambiguation.
     pub fn devices(&self) -> Result<Vec<DeviceRow>, ProfileError> {
         Ok(devices::list(&self.db)?)
@@ -229,6 +245,7 @@ impl ProfileService {
 mod tests {
     use super::*;
     use crate::adb::props::DeviceProps;
+    use crate::automation::Schedule;
     use crate::database::devices::DEFAULT_FOLDERS;
 
     fn props() -> DeviceProps {
@@ -246,6 +263,30 @@ mod tests {
             .expect("device row");
         devices::seed_default_folders(&db, device.id).expect("folders");
         (ProfileService::new(db), device.id)
+    }
+
+    #[test]
+    fn the_schedule_is_stored_readable_and_in_range() {
+        let (service, id) = service();
+        for wanted in [
+            Schedule::OnConnect,
+            Schedule::EveryHours(6),
+            // Out of range on the way in, stored in range: the panel cannot
+            // write an interval its own control cannot display.
+            Schedule::EveryHours(0),
+            Schedule::EveryHours(10_000),
+        ] {
+            let stored = service.set_auto_schedule(id, wanted).expect("write");
+            assert_eq!(stored, wanted.clamped());
+            let row = service.device(id).expect("read").expect("row");
+            assert_eq!(row.auto_schedule, wanted.clamped());
+        }
+        // Turning it off is a real edit, not a missing value.
+        service.set_auto_schedule(id, Schedule::Off).expect("write");
+        assert_eq!(
+            service.device(id).unwrap().unwrap().auto_schedule,
+            Schedule::Off
+        );
     }
 
     #[test]

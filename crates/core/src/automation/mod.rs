@@ -11,4 +11,4 @@ pub mod schedule;
 
 pub use driver::{AutomationDriver, DriverConfig, NoteSink, SharedNoteSink, TickHost};
 pub use policy::{AttemptError, Host, Note, PausedJob, Policy};
-pub use schedule::{Schedule, MAX_INTERVAL_HOURS, MIN_INTERVAL_HOURS};
+pub use schedule::{Schedule, DEFAULT_INTERVAL_HOURS, MAX_INTERVAL_HOURS, MIN_INTERVAL_HOURS};

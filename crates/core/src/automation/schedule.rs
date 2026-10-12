@@ -20,6 +20,13 @@ use serde::{Deserialize, Serialize};
 pub const MIN_INTERVAL_HOURS: u32 = 1;
 pub const MAX_INTERVAL_HOURS: u32 = 72;
 
+/// The interval the settings panel starts from when the user turns "every N
+/// hours" on for the first time.
+///
+/// A day, because that is the unit people think in for this ("back up daily"),
+/// and it leaves room in both directions inside the bounds.
+pub const DEFAULT_INTERVAL_HOURS: u32 = 24;
+
 const SECS_PER_HOUR: u64 = 3600;
 
 /// When backups run without the user pressing a button.
@@ -212,6 +219,16 @@ mod tests {
                 previous = answer;
             }
         }
+    }
+
+    #[test]
+    fn the_default_interval_is_one_the_ui_can_show() {
+        // A default outside the bounds would make the settings panel's first
+        // click write a value its own control cannot display.
+        assert!(
+            (MIN_INTERVAL_HOURS..=MAX_INTERVAL_HOURS).contains(&DEFAULT_INTERVAL_HOURS),
+            "{DEFAULT_INTERVAL_HOURS} is outside {MIN_INTERVAL_HOURS}..={MAX_INTERVAL_HOURS}"
+        );
     }
 
     #[test]

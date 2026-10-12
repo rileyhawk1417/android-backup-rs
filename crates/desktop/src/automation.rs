@@ -47,7 +47,7 @@ use android_backup_core::database::jobs::{self, JobStatus, JobTrigger};
 use android_backup_core::database::Db;
 use android_backup_core::devices::backup_gate;
 use android_backup_core::devices::watcher::DeviceSnapshotHandle;
-use android_backup_core::devices::DeviceInfo;
+use android_backup_core::devices::{DeviceInfo, DeviceSink, SharedSink};
 
 use crate::app::UiMessage;
 use crate::jobconfig;
@@ -233,6 +233,86 @@ impl AppHost {
     }
 }
 
+/// Gives a newly discovered device the answer the first-run wizard collected
+/// (E09.6).
+///
+/// The wizard asks once whether phones should be backed up as they are plugged in.
+/// Answering "yes" writes a *default*, not a promise about devices already known: it
+/// is applied when a device is first recorded, and never again. A phone whose
+/// schedule the user later turns off keeps it off, because by then the row exists and
+/// this sink only ever speaks about rows that do not.
+///
+/// The check-then-write is safe because the sink is the only thing that creates
+/// device rows, and it does so on one thread (the watcher's).
+pub struct OptInSink {
+    inner: SharedSink,
+    db: Arc<Db>,
+    /// The answer as it stands, not as it stood when the watcher was spawned: the
+    /// wizard can be answered while a watcher is already running (it is shown on the
+    /// first launch, and adb may have been found before it), and the phone that
+    /// appears a moment later should hear the answer the user just gave.
+    default: std::sync::RwLock<Schedule>,
+}
+
+impl OptInSink {
+    pub fn new(inner: SharedSink, db: Arc<Db>, default: Schedule) -> Self {
+        Self {
+            inner,
+            db,
+            default: std::sync::RwLock::new(default),
+        }
+    }
+
+    /// Change the answer for devices discovered from now on.
+    pub fn set_default(&self, schedule: Schedule) {
+        // A poisoned lock still holds the last value written, which is exactly the
+        // value to keep; a panic in the watcher thread is not worth a second one.
+        *self
+            .default
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = schedule;
+    }
+
+    fn default(&self) -> Schedule {
+        *self
+            .default
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl DeviceSink for OptInSink {
+    fn upsert(&self, device: &DeviceInfo) {
+        let default = self.default();
+        // "Known" is read *before* the write: the write is what makes it known.
+        let known = devices::get_by_serial(&self.db, &device.serial);
+        self.inner.upsert(device);
+        if default == Schedule::Off || !matches!(known, Ok(None)) {
+            return;
+        }
+        match devices::get_by_serial(&self.db, &device.serial) {
+            Ok(Some(row)) => match devices::set_auto_schedule(&self.db, row.id, default) {
+                Ok(()) => tracing::info!(
+                    device = %device.serial,
+                    schedule = ?default,
+                    "new device opts into automatic backups"
+                ),
+                Err(err) => tracing::warn!(
+                    device = %device.serial,
+                    %err,
+                    "could not apply the default schedule to a new device"
+                ),
+            },
+            // The inner sink refused the write (a manifest that will not answer);
+            // there is nothing to record the intent against.
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(device = %device.serial, %err, "could not read a new device row")
+            }
+        }
+    }
+}
+
 /// Wraps a note sink so that automation news also wakes the window.
 ///
 /// The clock runs on its own thread and the window draws on demand: without this,
@@ -263,5 +343,136 @@ impl android_backup_core::automation::driver::NoteSink for RepaintingNote {
         {
             ctx.request_repaint();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use android_backup_core::adb::parse::RawState;
+    use android_backup_core::adb::props::DeviceProps;
+    use android_backup_core::devices::DeviceState;
+
+    fn info(serial: &str) -> DeviceInfo {
+        DeviceInfo {
+            serial: serial.to_string(),
+            state: DeviceState::Connected,
+            raw_state: RawState::Device,
+            listing_model: Some("Pixel 8".to_string()),
+            listing_product: None,
+            transport_id: None,
+            props: DeviceProps {
+                manufacturer: Some("Google".to_string()),
+                model: Some("Pixel 8".to_string()),
+                product: Some("shiba".to_string()),
+                android_version: Some("15".to_string()),
+            },
+        }
+    }
+
+    /// The real database sink, so the row the opt-in writes is the row the engine
+    /// will read.
+    fn sink(db: &Arc<Db>, default: Schedule) -> OptInSink {
+        OptInSink::new(Arc::clone(db) as SharedSink, Arc::clone(db), default)
+    }
+
+    #[test]
+    fn the_answer_can_change_after_the_watcher_is_running() {
+        // The wizard is answered on the first frame, which can be after the watcher
+        // has already been spawned: the sink must not be frozen at its spawn value.
+        let db = Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let sink = sink(&db, Schedule::Off);
+
+        sink.upsert(&info("SER1"));
+        assert_eq!(
+            devices::get_by_serial(&db, "SER1")
+                .unwrap()
+                .unwrap()
+                .auto_schedule,
+            Schedule::Off,
+            "no answer yet, so nothing is scheduled"
+        );
+
+        sink.set_default(Schedule::EveryHours(6));
+        sink.upsert(&info("SER2"));
+        assert_eq!(
+            devices::get_by_serial(&db, "SER2")
+                .unwrap()
+                .unwrap()
+                .auto_schedule,
+            Schedule::EveryHours(6)
+        );
+
+        // And unticking it again is an answer too.
+        sink.set_default(Schedule::Off);
+        sink.upsert(&info("SER3"));
+        assert_eq!(
+            devices::get_by_serial(&db, "SER3")
+                .unwrap()
+                .unwrap()
+                .auto_schedule,
+            Schedule::Off
+        );
+    }
+
+    #[test]
+    fn a_new_device_inherits_the_wizards_answer_once() {
+        let db = Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let sink = sink(&db, Schedule::OnConnect);
+
+        sink.upsert(&info("SER1"));
+        let row = devices::get_by_serial(&db, "SER1").unwrap().unwrap();
+        assert_eq!(row.auto_schedule, Schedule::OnConnect);
+
+        // The user's own answer wins from then on: the default is a starting
+        // point, not a rule that reasserts itself on every poll.
+        devices::set_auto_schedule(&db, row.id, Schedule::Off).unwrap();
+        sink.upsert(&info("SER1"));
+        assert_eq!(
+            devices::get_by_serial(&db, "SER1")
+                .unwrap()
+                .unwrap()
+                .auto_schedule,
+            Schedule::Off
+        );
+
+        // Another phone, though, has not answered anything yet.
+        sink.upsert(&info("SER2"));
+        assert_eq!(
+            devices::get_by_serial(&db, "SER2")
+                .unwrap()
+                .unwrap()
+                .auto_schedule,
+            Schedule::OnConnect
+        );
+    }
+
+    #[test]
+    fn without_the_opt_in_new_devices_stay_off() {
+        let db = Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let sink = sink(&db, Schedule::Off);
+        sink.upsert(&info("SER1"));
+        assert_eq!(
+            devices::get_by_serial(&db, "SER1")
+                .unwrap()
+                .unwrap()
+                .auto_schedule,
+            Schedule::Off
+        );
+    }
+
+    /// The interval form is a default too, and it is stored clamped.
+    #[test]
+    fn an_interval_default_is_stored_in_range() {
+        let db = Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let sink = sink(&db, Schedule::EveryHours(1_000));
+        sink.upsert(&info("SER1"));
+        assert_eq!(
+            devices::get_by_serial(&db, "SER1")
+                .unwrap()
+                .unwrap()
+                .auto_schedule,
+            Schedule::EveryHours(android_backup_core::automation::MAX_INTERVAL_HOURS)
+        );
     }
 }

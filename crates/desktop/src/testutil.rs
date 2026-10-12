@@ -23,10 +23,82 @@ use android_backup_core::adb::installer::{
 use android_backup_core::adb::locate::AdbVersion;
 
 use crate::app::TrayFactory;
+use crate::autostart;
 use crate::notifications::{Notice, Notifier};
 use crate::picker::Picker;
 use crate::startup::AdbInstaller;
 use crate::tray::{TrayCommand, TrayHandle, TrayState, Wiring};
+
+/// A login entry that records what was asked of it and can be told to refuse.
+///
+/// The real mechanism writes to the Windows registry or to `~/.config/autostart`: a
+/// test that used it would edit the machine running the tests. It also has to be able
+/// to *fail*, because "the desktop would not take it" is the outcome the settings panel
+/// has to word correctly.
+pub struct FakeStartup {
+    status: Mutex<autostart::Status>,
+    fail: Option<String>,
+    calls: Mutex<Vec<&'static str>>,
+}
+
+impl FakeStartup {
+    /// A machine where the entry is currently `status` and every write works.
+    pub fn new(status: autostart::Status) -> Arc<Self> {
+        Arc::new(Self {
+            status: Mutex::new(status),
+            fail: None,
+            calls: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// A machine that refuses every write with `reason`.
+    pub fn failing(status: autostart::Status, reason: &str) -> Arc<Self> {
+        Arc::new(Self {
+            status: Mutex::new(status),
+            fail: Some(reason.to_string()),
+            calls: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// What has been asked of it, in order.
+    pub fn calls(&self) -> Vec<&'static str> {
+        lock(&self.calls).clone()
+    }
+
+    /// Where the entry stands now.
+    pub fn state(&self) -> autostart::Status {
+        lock(&self.status).clone()
+    }
+}
+
+impl autostart::Startup for FakeStartup {
+    fn status(&self) -> autostart::Status {
+        lock(&self.calls).push("status");
+        self.state()
+    }
+
+    fn enable(&self) -> Result<(), String> {
+        lock(&self.calls).push("enable");
+        match &self.fail {
+            Some(reason) => return Err(reason.clone()),
+            None => *lock(&self.status) = autostart::Status::Enabled,
+        }
+        Ok(())
+    }
+
+    fn disable(&self) -> Result<(), String> {
+        lock(&self.calls).push("disable");
+        match &self.fail {
+            Some(reason) => return Err(reason.clone()),
+            None => *lock(&self.status) = autostart::Status::Disabled,
+        }
+        Ok(())
+    }
+
+    fn location(&self) -> String {
+        "fake".to_string()
+    }
+}
 
 /// A mutex guard that survives a poisoned lock: one failing assertion must not
 /// turn the next one into a different failure.

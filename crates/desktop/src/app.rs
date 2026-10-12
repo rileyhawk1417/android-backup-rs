@@ -21,6 +21,7 @@ use android_backup_core::adb::locate::{AdbFound, AdbLocateError};
 use android_backup_core::adb::runner::Adb;
 use android_backup_core::automation::driver::{AutomationDriver, DriverConfig, SharedNoteSink};
 use android_backup_core::automation::policy::Policy;
+use android_backup_core::automation::Schedule;
 use android_backup_core::backup::controller::{BackupController, JobHandle};
 use android_backup_core::backup::destination::{self, FsProbe, LocalFsProbe};
 use android_backup_core::backup::enumerate::RemoteFiles;
@@ -34,7 +35,8 @@ use android_backup_core::devices::profile::ProfileService;
 use android_backup_core::devices::watcher::{DeviceSnapshotHandle, DeviceWatcher, WatcherConfig};
 use android_backup_core::devices::{DeviceEvent, DeviceInfo, DeviceSink, SharedSink};
 
-use crate::automation::{AppHost, RepaintingNote};
+use crate::automation::{AppHost, OptInSink, RepaintingNote};
+use crate::autostart::{self, Startup, Status as StartupStatus};
 use crate::jobconfig;
 use crate::notifications::{AutomationToasts, Notice, Notifications, Notifier};
 use crate::picker::{NativePicker, Picker};
@@ -83,6 +85,10 @@ pub struct AppDeps {
     /// Builds the automation clock. `None` in a run with no controller or no
     /// manifest — nothing to schedule — and in tests that drive the policy by hand.
     pub automation: bool,
+    /// The "start when I log in" entry, when this machine has a mechanism for one
+    /// (E09.5). `None` on a platform that cannot, which the settings panel then says
+    /// rather than offering a checkbox that does nothing.
+    pub startup: Option<Arc<dyn Startup>>,
 }
 
 /// How the application gets a tray icon: handed a channel for menu clicks and the
@@ -110,6 +116,7 @@ impl AppDeps {
             watch_devices: true,
             tray: None,
             automation: false,
+            startup: None,
         }
     }
 }
@@ -181,6 +188,9 @@ pub struct App {
     notifications: Arc<Notifications>,
     probe: Arc<dyn FsProbe>,
     watcher: Option<DeviceWatcher>,
+    /// The watcher's outermost sink, kept so the wizard's answer can be changed
+    /// while the watcher is already running (E09.6).
+    opt_in: Option<Arc<OptInSink>>,
     adb: Option<Arc<dyn Adb>>,
     adb_found: Option<AdbFound>,
     /// Managed installer (E07.1); `None` when the platform cannot install or the
@@ -214,6 +224,12 @@ pub struct App {
     /// The same toast sink the clock holds, so notes raised on this thread go
     /// through the same delivery policy (E09.4).
     toasts: Option<SharedNoteSink>,
+    /// The login entry, for the settings panel to read and write (E09.5/E09.6).
+    startup: Option<Arc<dyn Startup>>,
+    /// What the last attempt at changing that entry did, in one line. Kept because a
+    /// checkbox that silently springs back (a Windows Run key the user's policy
+    /// forbids, a read-only autostart directory) is worse than a sentence saying so.
+    startup_note: Option<String>,
 
     // -- view state -------------------------------------------------------
     view: ViewState,
@@ -249,6 +265,8 @@ pub struct App {
     /// Set when the user asked to quit from the tray: the window must then really
     /// close, rather than hide itself as `close_to_tray` would have it do.
     quitting: bool,
+    /// The first-run wizard's "back up automatically" box, before it is accepted.
+    welcome_auto: bool,
     /// A `--hidden` start that has not been honoured yet (E09.5).
     start_hidden: bool,
 }
@@ -318,6 +336,7 @@ impl App {
             watch_devices,
             tray: tray_factory,
             automation: run_automation,
+            startup,
         } = deps;
         let probe: Arc<dyn FsProbe> = probe.unwrap_or_else(|| Arc::new(LocalFsProbe::new()));
         let picker: Arc<dyn Picker> = picker.unwrap_or_else(|| Arc::new(NativePicker));
@@ -356,12 +375,22 @@ impl App {
             }
         }
 
+        let mut opt_in_slot: Option<Arc<OptInSink>> = None;
         let watcher = match (&adb, &db, watch_devices) {
             (Some(adb), Some(db), true) => {
-                let sink: SharedSink = Arc::new(RepaintingSink {
+                let repaint: SharedSink = Arc::new(RepaintingSink {
                     inner: Arc::clone(db) as SharedSink,
                     ctx: Arc::clone(&ctx_slot),
                 });
+                // Outermost: a phone seen for the first time takes the answer the
+                // wizard collected, before anything downstream reads its row.
+                let opt_in = Arc::new(OptInSink::new(
+                    repaint,
+                    Arc::clone(db),
+                    cfg.automation.default_schedule,
+                ));
+                let sink: SharedSink = Arc::clone(&opt_in) as SharedSink;
+                opt_in_slot = Some(Arc::clone(&opt_in));
                 Some(DeviceWatcher::spawn(
                     Arc::clone(adb),
                     Some(sink),
@@ -371,6 +400,25 @@ impl App {
             _ => None,
         };
 
+        // Bring the login entry in line with the configuration (E09.5). Declarative:
+        // `background.run_at_login` says whether it is wanted, and this makes the
+        // desktop agree — which is also what repairs an entry the user removed by hand,
+        // and what removes one they turned off. Done here rather than in `main` so that
+        // the settings panel and the startup share one owner of the entry, and so a test
+        // can hand the app a fake mechanism.
+        let startup_note = startup.as_ref().map(|startup| {
+            let outcome = autostart::reconcile(cfg.background.run_at_login, startup.as_ref());
+            tracing::info!(location = %startup.location(), "{}", outcome.summary());
+            outcome.summary()
+        });
+        // The wish is left in the configuration even when the desktop refused it: a
+        // policy that changes its mind should not need the user to remember to re-tick
+        // the box, and the panel says what actually happened instead of re-writing
+        // their settings behind their back.
+
+        // The wizard's box reflects the configuration, so a tick survives a restart
+        // even if the wizard itself comes back.
+        let welcome_auto = cfg.automation.default_schedule != Schedule::Off;
         let mut app = Self {
             paths,
             cfg,
@@ -380,6 +428,7 @@ impl App {
             remote,
             probe,
             watcher,
+            opt_in: opt_in_slot,
             adb,
             adb_found,
             installer,
@@ -395,6 +444,8 @@ impl App {
             policy: None,
             host: None,
             toasts: None,
+            startup,
+            startup_note,
             view,
             handles: HashMap::new(),
             history: HashMap::new(),
@@ -406,6 +457,8 @@ impl App {
             name_buffer: String::new(),
             name_serial: None,
             name_error: None,
+            // The wizard's opt-in box (E09.6), off until it is ticked.
+            welcome_auto,
             folder_buffer: String::new(),
             folder_error: None,
             location_error: None,
@@ -695,6 +748,24 @@ impl App {
         self.tray.is_some()
     }
 
+    /// Why there is no tray icon, when there is none.
+    ///
+    /// Two different facts, and only one of them is the user's own setting: a desktop
+    /// with nowhere to put an icon is a limit of the machine, while
+    /// `background.tray_icon` is a choice the user made in the configuration file. The
+    /// settings panel says which, because "off and cannot be turned on" must not read
+    /// the same as "you turned this off".
+    pub fn tray_absence_reason(&self) -> Option<&'static str> {
+        if self.tray.is_some() {
+            return None;
+        }
+        if self.cfg.background.tray_icon {
+            Some("this desktop gives it nowhere to put one")
+        } else {
+            Some("the tray icon is switched off in the configuration file")
+        }
+    }
+
     /// Are automatic backups paused? The toggle's state, for the tray menu and the
     /// status strip.
     pub fn automation_paused(&self) -> bool {
@@ -734,6 +805,34 @@ impl App {
     /// Does closing the window hide it rather than quit?
     pub fn close_to_tray(&self) -> bool {
         self.cfg.background.close_to_tray && self.tray.is_some() && !self.quitting
+    }
+
+    // -- Background settings, as the settings panel reads them (E09.6) ----------
+    //
+    // Deliberately the *stored* values, not the effective ones: the panel's job is to
+    // show what the user asked for and then say, in words, what the machine did about
+    // it. `close_to_tray()` above folds in whether a tray exists, which is the answer
+    // for the close button, not for a checkbox.
+
+    /// Is the "close hides the window" setting turned on?
+    pub fn close_to_tray_setting(&self) -> bool {
+        self.cfg.background.close_to_tray
+    }
+
+    /// Is the login entry switched on in the configuration?
+    pub fn run_at_login(&self) -> bool {
+        self.cfg.background.run_at_login
+    }
+
+    /// Can this machine do "start at login" at all? `None` when it cannot, which the
+    /// panel words as a fact about the machine rather than a setting it greyed out.
+    pub fn startup_status(&self) -> Option<StartupStatus> {
+        self.startup.as_ref().map(|startup| startup.status())
+    }
+
+    /// What the last change to the login entry did, in one line, for the panel.
+    pub fn startup_note(&self) -> Option<&str> {
+        self.startup_note.as_deref()
     }
 
     /// Hide the window, leaving the process (and automation) running.
@@ -824,13 +923,59 @@ impl App {
             self.start_note = Some(format!("the setting could not be saved: {err}"));
             return;
         }
-        // The status strip, until E09.6 gives automation a settings panel of its own.
-        self.start_note = Some(if paused {
-            "Automatic backups are paused. Devices keep their schedules; nothing is forgotten."
-                .to_string()
-        } else {
-            "Automatic backups are on again.".to_string()
-        });
+        // Nothing to announce here: the brake is the same flag the panel's switch,
+        // the status bar and the tray icon all read, so all three have already
+        // changed by the time this returns (E09.6).
+        tracing::info!(paused, "automatic backups toggled");
+    }
+
+    /// Turn "closing the window hides it" on or off, and persist it.
+    ///
+    /// Saved immediately, like the automation pause: a setting that only takes effect
+    /// on the next start would surprise whoever closes the window to test it.
+    fn set_close_to_tray(&mut self, on: bool) {
+        if self.cfg.background.close_to_tray == on {
+            return;
+        }
+        self.cfg.background.close_to_tray = on;
+        match self.cfg.save(&self.paths.config_file) {
+            Ok(()) => tracing::info!(close_to_tray = on, "close behaviour changed"),
+            Err(err) => {
+                tracing::warn!(%err, "could not save the close behaviour");
+                self.start_note = Some(format!("the setting could not be saved: {err}"));
+            }
+        }
+    }
+
+    /// Turn the login entry on or off: write the wish, then ask the desktop.
+    ///
+    /// The configuration is written first and the entry reconciled after, so the two
+    /// agree on the next run even if the write to the desktop fails now. The outcome is
+    /// kept for the panel ([`Self::startup_note`]) instead of being swallowed: "off and
+    /// cannot be turned on" must not look the same as "off".
+    fn set_run_at_login(&mut self, on: bool) {
+        self.cfg.background.run_at_login = on;
+        if let Err(err) = self.cfg.save(&self.paths.config_file) {
+            tracing::warn!(%err, "could not save the run-at-login setting");
+            self.start_note = Some(format!("the setting could not be saved: {err}"));
+        }
+        let Some(startup) = self.startup.clone() else {
+            return;
+        };
+        let outcome = autostart::reconcile(on, startup.as_ref());
+        tracing::info!(location = %startup.location(), "{}", outcome.summary());
+        self.startup_note = Some(outcome.summary());
+        if let autostart::Reconciled::Failed(reason) | autostart::Reconciled::Unavailable(reason) =
+            &outcome
+        {
+            self.view.set_banner(Some(Banner {
+                message: format!(
+                    "Starting with the system could not be changed: {reason}. \
+                     The setting is remembered and tried again next time."
+                ),
+                blocking: false,
+            }));
+        }
     }
 
     /// Take over a job the automation clock started on its own thread.
@@ -1419,6 +1564,35 @@ impl App {
         }
     }
 
+    /// Set when this device backs itself up (E09.6).
+    ///
+    /// The write goes through [`ProfileService`], which clamps the interval and is
+    /// the same door every other profile edit uses, so the schedule in the panel,
+    /// in the manifest and in the engine's rulebook are one value. The row is then
+    /// re-read rather than assumed: what the panel shows next is what was stored.
+    fn set_auto_schedule(&mut self, schedule: Schedule) {
+        self.start_note = None;
+        let Some(profiles) = self.profiles.as_ref() else {
+            self.start_note =
+                Some("the manifest is unavailable, so nothing can be scheduled".to_string());
+            return;
+        };
+        let Some(device_id) = self.selected_device_id() else {
+            return;
+        };
+        match profiles.set_auto_schedule(device_id, schedule) {
+            Ok(stored) => {
+                tracing::info!(device_id, schedule = ?stored, "automatic backup schedule changed");
+                // The panel's row is a copy, so it is refreshed from the manifest —
+                // the click is only believed once the database agrees.
+                if let Some(serial) = self.view.selected_serial().map(str::to_string) {
+                    self.apply_row_for(&serial);
+                }
+            }
+            Err(err) => self.start_note = Some(err.to_string()),
+        }
+    }
+
     fn toggle_folder(&mut self, source_path: &str, enabled: bool) {
         let Some(profiles) = self.profiles.as_ref() else {
             return;
@@ -1740,10 +1914,20 @@ impl App {
                     )));
                 }
                 if let Some(db) = self.db.as_ref() {
-                    let sink: SharedSink = Arc::new(RepaintingSink {
+                    let repaint: SharedSink = Arc::new(RepaintingSink {
                         inner: Arc::clone(db) as SharedSink,
                         ctx: Arc::clone(&self.ctx_slot),
                     });
+                    // The same two wrappers as the watcher built at startup: this one
+                    // is being built *because* the wizard was answered, so it has to
+                    // carry its answer too.
+                    let opt_in = Arc::new(OptInSink::new(
+                        repaint,
+                        Arc::clone(db),
+                        self.cfg.automation.default_schedule,
+                    ));
+                    let sink: SharedSink = Arc::clone(&opt_in) as SharedSink;
+                    self.opt_in = Some(opt_in);
                     self.watcher = Some(DeviceWatcher::spawn(
                         runner as Arc<dyn Adb>,
                         Some(sink),
@@ -1774,6 +1958,20 @@ impl App {
         let path = startup::suggested_backup_dir(&self.cfg);
         self.set_global_backup_dir(path, true);
         self.view.dismiss_modal();
+    }
+
+    /// Gives a newly discovered device the answer the first-run wizard collected.
+    ///
+    /// The box is written the moment it is ticked, and it is the *configuration's*
+    /// default schedule (E09.1) — one value, so the wizard, the config file and
+    /// [`OptInSink`] cannot disagree. It is not tied to the buttons next to it: a user
+    /// who ticks it and then defers the location question has still answered this one.
+    fn set_welcome_auto(&mut self, on: bool) {
+        self.welcome_auto = on;
+        announce_welcome_auto(self.opt_in.as_deref(), &mut self.cfg, on);
+        if let Err(message) = startup::save_config(&self.cfg, &self.paths) {
+            self.location_error = Some(message);
+        }
     }
 
     fn dismiss_modal(&mut self) {
@@ -1961,7 +2159,17 @@ pub enum Intent {
     StartAllConnected,
     /// Pause or resume automation as a whole (the tray's item).
     ToggleAutomation,
-    /// Leave the application for good, from the tray.
+    /// Set when this device backs itself up (E09.6).
+    SetAutoSchedule(Schedule),
+    /// Tick or untick the first-run wizard's "back up automatically" box.
+    SetWelcomeAuto(bool),
+    /// Open the background settings (the status bar's button, E09.6).
+    OpenBackground,
+    /// Close the window to the tray, or stop doing that.
+    SetCloseToTray(bool),
+    /// Start the program when the user logs in.
+    SetRunAtLogin(bool),
+    /// Leave the application for good, from the tray or the settings panel.
     Quit,
     ToggleHistoryRow(i64),
     LoadMoreFiles,
@@ -1995,6 +2203,11 @@ impl App {
             Intent::Cancel => self.cancel_backup(),
             Intent::StartAllConnected => self.start_all_connected(),
             Intent::ToggleAutomation => self.toggle_automation(),
+            Intent::SetAutoSchedule(schedule) => self.set_auto_schedule(schedule),
+            Intent::SetWelcomeAuto(on) => self.set_welcome_auto(on),
+            Intent::OpenBackground => self.view.set_modal(Modal::Background),
+            Intent::SetCloseToTray(on) => self.set_close_to_tray(on),
+            Intent::SetRunAtLogin(on) => self.set_run_at_login(on),
             Intent::Quit => self.quit(),
             Intent::ToggleHistoryRow(job_id) => self.toggle_history_row(job_id),
             Intent::LoadMoreFiles => self.load_more_files(),
@@ -2070,6 +2283,43 @@ impl App {
     pub fn welcome_open(&self) -> bool {
         matches!(self.view.modal(), Some(Modal::Welcome { .. }))
     }
+
+    // ---------------------------------------------------------------------
+    // Automatic backups (E09.6): the same switch the tray and the engine use
+    // ---------------------------------------------------------------------
+
+    /// The schedule of the selected device, as the manifest has it.
+    pub fn selected_schedule(&self) -> Option<Schedule> {
+        self.view.selected().map(|device| device.schedule())
+    }
+
+    /// The wizard's opt-in box, ticked or not.
+    pub fn welcome_auto(&self) -> bool {
+        self.welcome_auto
+    }
+
+    /// The automation status line for the selected device, or `None` when there is
+    /// no device to describe.
+    ///
+    /// Assembled here because the renderer must not read the manifest or the clock;
+    /// the wording itself is [`crate::view::auto_status_line`], which is pure and
+    /// tested on its own.
+    pub fn auto_status(&self) -> Option<String> {
+        let device = self.view.selected()?;
+        let last_attempt = device
+            .row
+            .as_ref()
+            .and_then(|row| self.latest_job(row.id))
+            .map(|job| job.started_at.as_str());
+        Some(crate::view::auto_status_line(&crate::view::AutoStatus {
+            schedule: device.schedule(),
+            last_attempt,
+            now_unix: android_backup_core::clock::now_unix(),
+            device_name: &device.name,
+            now: device.auto_now(),
+            paused: self.automation_paused(),
+        }))
+    }
 }
 
 /// The default locations list, for the welcome wizard's hint.
@@ -2085,6 +2335,25 @@ pub fn default_locations() -> Vec<(&'static str, String)> {
         ));
     }
     out
+}
+
+/// Records the wizard's answer and tells a watcher that is already running.
+///
+/// Written down *and* pushed: the box is answered on the first frame, by which time a
+/// watcher may have been spawned and may be about to record a phone. The next device
+/// to appear therefore hears the answer the user just gave, not the one in force when
+/// the watcher started ([`OptInSink::set_default`]).
+fn announce_welcome_auto(sink: Option<&OptInSink>, cfg: &mut AppConfig, on: bool) -> Schedule {
+    let schedule = if on {
+        Schedule::OnConnect
+    } else {
+        Schedule::Off
+    };
+    cfg.automation.default_schedule = schedule;
+    if let Some(sink) = sink {
+        sink.set_default(schedule);
+    }
+    schedule
 }
 
 /// A device's destination path as text, or the reason there is none.
@@ -2173,6 +2442,17 @@ mod tests {
         dir: &Path,
         remote: Arc<dyn RemoteFiles>,
     ) -> (App, std::rc::Rc<RecordingTray>, Arc<RecordingNotifier>) {
+        app_with_tray_startup_and(dir, remote, None, false)
+    }
+
+    /// The same, with a login entry the test can watch as well as a tray, and with the
+    /// configuration's wish about that entry set before the application is built.
+    fn app_with_tray_startup_and(
+        dir: &Path,
+        remote: Arc<dyn RemoteFiles>,
+        startup: Option<Arc<dyn Startup>>,
+        run_at_login: bool,
+    ) -> (App, std::rc::Rc<RecordingTray>, Arc<RecordingNotifier>) {
         let recorder = testutil::recorder();
         let (factory, tray) = testutil::tray();
         let paths = AppPaths::with_root(&dir.join("cfg"), &dir.join("data"));
@@ -2182,6 +2462,10 @@ mod tests {
         std::fs::create_dir_all(&backup_dir).expect("backup dir");
         let cfg = AppConfig {
             global_backup_dir: Some(backup_dir),
+            background: android_backup_core::config::BackgroundConfig {
+                run_at_login,
+                ..Default::default()
+            },
             ..AppConfig::default()
         };
         let adb = Arc::new(MockAdb::new().always(MockAdb::ok(""))) as Arc<dyn Adb>;
@@ -2200,6 +2484,7 @@ mod tests {
             watch_devices: false,
             tray: Some(factory),
             automation: true,
+            startup,
         });
         (app, tray, recorder)
     }
@@ -2224,6 +2509,53 @@ mod tests {
         // The output is where the viewport commands land, which is what the window
         // thread would act on; asserting on them is `ui_headless`'s job, not this one.
         let _ = ctx.run(input, |ctx| app.frame(ctx));
+    }
+
+    /// The wizard's answer has to reach a watcher that is already running, because it
+    /// is answered on the first frame and the watcher may have started before that: the
+    /// phone that appears a moment later must hear it.
+    #[test]
+    fn the_wizards_answer_reaches_a_watcher_that_is_already_running() {
+        use android_backup_core::devices::{DeviceSink, SharedSink};
+        let db = Arc::new(Db::open_in_memory().expect("db"));
+        db.migrate().expect("migrate");
+        let sink = OptInSink::new(
+            Arc::clone(&db) as SharedSink,
+            Arc::clone(&db),
+            Schedule::Off,
+        );
+        let mut cfg = AppConfig::default();
+
+        assert_eq!(
+            announce_welcome_auto(Some(&sink), &mut cfg, true),
+            Schedule::OnConnect
+        );
+        assert_eq!(cfg.automation.default_schedule, Schedule::OnConnect);
+
+        // A phone discovered after the box was ticked — but by the watcher that was
+        // spawned before it — is scheduled.
+        sink.upsert(&connected("SER1"));
+        assert_eq!(
+            devices::get_by_serial(&db, "SER1")
+                .expect("read")
+                .expect("row")
+                .auto_schedule,
+            Schedule::OnConnect
+        );
+
+        // Unticking is an answer too, and it travels the same way.
+        assert_eq!(
+            announce_welcome_auto(Some(&sink), &mut cfg, false),
+            Schedule::Off
+        );
+        sink.upsert(&connected("SER2"));
+        assert_eq!(
+            devices::get_by_serial(&db, "SER2")
+                .expect("read")
+                .expect("row")
+                .auto_schedule,
+            Schedule::Off
+        );
     }
 
     /// A device the way the watcher reports one that can be backed up.
@@ -2275,6 +2607,7 @@ mod tests {
             watch_devices: false,
             tray: None,
             automation: false,
+            startup: None,
         })
     }
 
@@ -2311,6 +2644,7 @@ mod tests {
             watch_devices: false,
             tray: None,
             automation: false,
+            startup: None,
         })
     }
 
@@ -2846,10 +3180,16 @@ mod tests {
     }
 
     /// Wait (bounded) for the installer thread to report, then fold the message.
+    ///
+    /// Two waits, because the installer announces itself from inside its own call —
+    /// a moment before the application thread queues the event that call produced. So
+    /// `done` says the thread is on its way back, and the queue is then followed until
+    /// the result has actually been handled: draining once can arrive in between, which
+    /// is rare enough to look like a mystery under load.
     fn wait_for_install(app: &mut App, done: &std::sync::mpsc::Receiver<()>) {
         done.recv_timeout(Duration::from_secs(5))
             .expect("the installer thread finished");
-        app.drain_events();
+        wait_until(app, |app| !app.installing);
     }
 
     #[test]
@@ -3164,6 +3504,86 @@ mod tests {
         frame(&mut app);
         assert!(!app.automation_paused());
         assert_eq!(tray.pauses(), vec![true, false]);
+    }
+
+    /// The settings panel is the only place a window with a tray icon can explain what
+    /// closing it does — and the only way back to quitting without the tray menu.
+    #[test]
+    fn the_settings_panel_switches_close_to_tray_off_and_saves_it() {
+        let dir = temp();
+        let (mut app, _tray, _) = app_with_tray(dir.path());
+        let config_file = app.paths.config_file.clone();
+        assert!(
+            app.close_to_tray(),
+            "a tray is present and the setting is on"
+        );
+
+        app.handle(Intent::OpenBackground);
+        assert_eq!(app.view().modal(), Some(&Modal::Background));
+
+        // Switching it off means the close button quits again, from this frame on.
+        app.handle(Intent::SetCloseToTray(false));
+        assert!(!app.close_to_tray());
+        assert!(
+            config_file.is_file() && !AppConfig::load(&config_file).background.close_to_tray,
+            "a setting that only takes effect on the next start would surprise whoever \
+             closes the window to test it"
+        );
+        close_button(&mut app);
+        assert!(!app.is_hidden(), "closing now quits rather than hides");
+        assert!(app.closing, "the event loop was asked to close the window");
+
+        // Dismissed once, and still reachable: this modal is opened by the user, so it
+        // is not one of the ones that may only appear once per run.
+        app.handle(Intent::DismissModal);
+        app.handle(Intent::OpenBackground);
+        assert_eq!(app.view().modal(), Some(&Modal::Background));
+    }
+
+    /// The login entry is brought in line with the configuration at startup, which is
+    /// also what repairs one the user removed by hand.
+    #[test]
+    fn the_login_entry_is_reconciled_when_the_app_starts() {
+        for (wanted, status, expect_enabled, expect_note) in [
+            (true, StartupStatus::Disabled, true, "run at login: enabled"),
+            (
+                false,
+                StartupStatus::Enabled,
+                false,
+                "run at login: disabled",
+            ),
+            (
+                true,
+                StartupStatus::Enabled,
+                true,
+                "run at login: no change needed",
+            ),
+            (
+                false,
+                StartupStatus::Disabled,
+                false,
+                "run at login: no change needed",
+            ),
+        ] {
+            let dir = temp();
+            let entry = testutil::FakeStartup::new(status.clone());
+            let (app, _, _) = app_with_tray_startup_and(
+                dir.path(),
+                Arc::new(MockRemote::new()),
+                Some(Arc::clone(&entry) as Arc<dyn Startup>),
+                wanted,
+            );
+            assert_eq!(
+                entry.state().is_enabled(),
+                expect_enabled,
+                "wanted={wanted} status={status:?}: the desktop must agree with the file"
+            );
+            assert_eq!(
+                app.startup_note(),
+                Some(expect_note),
+                "wanted={wanted} status={status:?}"
+            );
+        }
     }
 
     #[test]

@@ -12,9 +12,13 @@ use std::time::Duration;
 
 use egui::{Color32, RichText, Ui};
 
+use android_backup_core::automation::{
+    Schedule, DEFAULT_INTERVAL_HOURS, MAX_INTERVAL_HOURS, MIN_INTERVAL_HOURS,
+};
 use android_backup_core::database::files::BackupFileRow;
 
 use crate::app::{App, Intent, FILE_PAGE};
+use crate::autostart::Status as StartupStatus;
 use crate::view::{
     self, format_bytes, format_duration, format_speed, progress_headline, Banner, JobView, Modal,
     StartBlock,
@@ -123,6 +127,19 @@ fn status_bar(ctx: &egui::Context, app: &App, intents: &mut Vec<Intent>) {
             ui.separator();
             ui.label(RichText::new(app.view().adb_summary()).small());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // The brake, shown wherever the window is: paused automation is a
+                // state of the whole application, not of one device, and the same
+                // flag is what the tray menu writes (E09.5/E09.6).
+                if app.automation_paused() {
+                    if ui
+                        .button("Resume automatic backups")
+                        .on_hover_text("Nothing runs on a schedule until this is resumed.")
+                        .clicked()
+                    {
+                        intents.push(Intent::ToggleAutomation);
+                    }
+                    ui.colored_label(bad(ui), RichText::new("automatic backups paused").small());
+                }
                 if ui
                     .button("Backup location…")
                     .on_hover_text(app.default_destination_hint())
@@ -143,6 +160,18 @@ fn status_bar(ctx: &egui::Context, app: &App, intents: &mut Vec<Intent>) {
                             RichText::new("no backup location yet").small(),
                         );
                     }
+                }
+                // The way into the settings a window with a tray icon cannot show
+                // anywhere else: what closing does, and how to quit for good (E09.6).
+                if ui
+                    .button("Background…")
+                    .on_hover_text(
+                        "What happens when the window is closed, and whether the program \
+                         starts with the system.",
+                    )
+                    .clicked()
+                {
+                    intents.push(Intent::OpenBackground);
                 }
             });
         });
@@ -371,10 +400,120 @@ fn device_panel(
     let latest = device_id.and_then(|id| app.latest_job(id));
     ui.label(RichText::new(view::last_backup_line(latest)).strong());
 
+    // -- automatic backups (E09.6) -----------------------------------------
+    ui.add_space(4.0);
+    ui.separator();
+    automation_section(ui, app, intents);
+
     // -- history ----------------------------------------------------------
     ui.add_space(4.0);
     ui.separator();
     history_section(ui, app, intents);
+}
+
+/// When this device backs itself up, and whether it will run as things stand.
+///
+/// Three states rather than a checkbox, because "on connection" and "every N hours"
+/// are different promises and only one of them can be expressed as a time. The
+/// interval remembers the last value it was given ([`Schedule`] round-trips through
+/// the manifest), so switching away and back does not silently reset it to a day.
+///
+/// The pause switch is the *same* one the tray flips ([`Intent::ToggleAutomation`]),
+/// next to the schedules it governs: two controls for one flag cannot disagree, and
+/// the engine reads the flag, not the control.
+fn automation_section(ui: &mut Ui, app: &App, intents: &mut Vec<Intent>) {
+    ui.label(RichText::new("Automatic backups").strong());
+
+    let Some(schedule) = app.selected_schedule() else {
+        return;
+    };
+    let interval = match schedule {
+        Schedule::EveryHours(hours) => hours,
+        _ => DEFAULT_INTERVAL_HOURS,
+    };
+
+    // A radio row, then the interval under it: the number only means something
+    // once "every" is chosen, so it is shown but disabled otherwise (rather than
+    // hidden, which would make the row jump about as the user clicks).
+    let mut chosen = choice_of(schedule);
+    let mut hours = interval;
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        changed |= ui
+            .radio_value(&mut chosen, ScheduleChoice::Off, "Off")
+            .changed();
+        changed |= ui
+            .radio_value(&mut chosen, ScheduleChoice::OnConnect, "When connected")
+            .changed();
+        changed |= ui
+            .radio_value(&mut chosen, ScheduleChoice::Every, "Every")
+            .changed();
+        let number = ui.add_enabled(
+            chosen == ScheduleChoice::Every,
+            egui::DragValue::new(&mut hours)
+                .range(MIN_INTERVAL_HOURS..=MAX_INTERVAL_HOURS)
+                .suffix(" hours"),
+        );
+        // The drag itself is not the decision; letting go is. Otherwise a slow
+        // drag would write a row per frame.
+        changed |= number.drag_stopped() || number.lost_focus();
+    });
+
+    // One write per gesture that changed something: the number that did not move is
+    // not an edit, and the manifest is re-read afterwards, so the control and the row
+    // it came from stay the same value.
+    let wanted = chosen.schedule(hours);
+    if changed && wanted != schedule {
+        intents.push(Intent::SetAutoSchedule(wanted));
+    }
+
+    // The pause switch. It is the same flag the tray menu writes and the engine
+    // reads, so the two controls cannot disagree; the status line below says what
+    // the brake means for this device.
+    let mut paused = app.automation_paused();
+    ui.checkbox(&mut paused, "Pause all automatic backups")
+        .on_hover_text(
+            "Schedules are kept; nothing runs until you resume. Manual backups are \
+             unaffected.",
+        )
+        .changed()
+        .then(|| intents.push(Intent::ToggleAutomation));
+
+    if let Some(status) = app.auto_status() {
+        let colour = if schedule == Schedule::Off || paused {
+            muted(ui)
+        } else {
+            good(ui)
+        };
+        ui.colored_label(colour, status);
+    }
+}
+
+/// The three rows of the schedule control, as the widget sees them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScheduleChoice {
+    Off,
+    OnConnect,
+    Every,
+}
+
+impl ScheduleChoice {
+    fn schedule(self, hours: u32) -> Schedule {
+        match self {
+            ScheduleChoice::Off => Schedule::Off,
+            ScheduleChoice::OnConnect => Schedule::OnConnect,
+            ScheduleChoice::Every => Schedule::EveryHours(hours).clamped(),
+        }
+    }
+}
+
+/// Which row is showing, given the stored schedule.
+fn choice_of(schedule: Schedule) -> ScheduleChoice {
+    match schedule {
+        Schedule::Off => ScheduleChoice::Off,
+        Schedule::OnConnect => ScheduleChoice::OnConnect,
+        Schedule::EveryHours(_) => ScheduleChoice::Every,
+    }
 }
 
 fn backup_controls(ui: &mut Ui, app: &App, intents: &mut Vec<Intent>) {
@@ -591,13 +730,33 @@ fn modal_window(ctx: &egui::Context, app: &App, modal: &Modal, intents: &mut Vec
             ui.set_max_width(460.0);
             match modal {
                 Modal::Welcome { suggested_dir } => {
-                    ui.label("Welcome. Two quick things before your first backup:");
+                    ui.label("Welcome. Three quick things before your first backup:");
                     ui.add_space(6.0);
                     ui.label(RichText::new("1. Where should backups be stored?").strong());
                     ui.colored_label(muted(ui), suggested_dir);
                     ui.add_space(6.0);
                     ui.label(RichText::new("2. adb").strong());
                     ui.colored_label(muted(ui), adb_status_text(app));
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("3. Should new phones back up on their own?").strong());
+                    // Off unless it is ticked: automation is opt-in, and this writes
+                    // the configuration's default schedule the moment it is ticked
+                    // (E09.6). The devices already in the manifest are not touched.
+                    let mut opt_in = app.welcome_auto();
+                    if ui
+                        .checkbox(
+                            &mut opt_in,
+                            "Back up a phone when I plug it in (I can change this per device)",
+                        )
+                        .on_hover_text(
+                            "Phones plugged in later start a backup as soon as they are \
+                             unlocked. It only ever reads from the phone; nothing is \
+                             written back to it.",
+                        )
+                        .changed()
+                    {
+                        intents.push(Intent::SetWelcomeAuto(opt_in));
+                    }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Use the suggested folder").clicked() {
@@ -665,6 +824,7 @@ fn modal_window(ctx: &egui::Context, app: &App, modal: &Modal, intents: &mut Vec
                         intents.push(Intent::DismissModal);
                     }
                 }
+                Modal::Background => background_settings(ui, app, intents),
                 Modal::Error { message, .. } => {
                     ui.colored_label(bad(ui), message);
                     ui.add_space(8.0);
@@ -674,6 +834,102 @@ fn modal_window(ctx: &egui::Context, app: &App, modal: &Modal, intents: &mut Vec
                 }
             }
         });
+}
+
+/// The background settings: tray behaviour, the login entry, and the way out.
+///
+/// Every line here is read from the application on each frame rather than kept in the
+/// modal, so the panel cannot disagree with what the program is actually doing — a
+/// failed write to the login entry, in particular, has to look different from a
+/// successful one.
+fn background_settings(ui: &mut Ui, app: &App, intents: &mut Vec<Intent>) {
+    let has_tray = app.has_tray();
+
+    ui.label(RichText::new("When the window is closed").strong());
+    let mut close_to_tray = app.close_to_tray_setting();
+    if ui
+        .add_enabled(
+            has_tray,
+            egui::Checkbox::new(&mut close_to_tray, "Keep the program running in the tray"),
+        )
+        .on_hover_text(
+            "Automatic backups keep running with the window out of the way.              Nothing is written to the phone either way.",
+        )
+        .changed()
+    {
+        intents.push(Intent::SetCloseToTray(close_to_tray));
+    }
+    if has_tray {
+        ui.colored_label(
+            muted(ui),
+            "Closing the window hides it. Quit for good from the tray menu, or below.",
+        );
+    } else {
+        // Not a failure to fix here, and not necessarily the machine's fault: say
+        // which of the two it is rather than blaming the desktop for a setting.
+        let reason = app.tray_absence_reason().unwrap_or("there is no tray icon");
+        ui.colored_label(
+            muted(ui),
+            format!("No tray icon here — {reason} — so closing the window quits."),
+        );
+    }
+
+    ui.add_space(10.0);
+    ui.label(RichText::new("Starting with the system").strong());
+    let mut run_at_login = app.run_at_login();
+    match app.startup_status() {
+        None => {
+            ui.add_enabled(
+                false,
+                egui::Checkbox::new(&mut run_at_login, "Start in the tray when I log in"),
+            );
+            ui.colored_label(muted(ui), "This build cannot start itself at login.");
+        }
+        Some(StartupStatus::Unavailable(reason)) => {
+            ui.add_enabled(
+                false,
+                egui::Checkbox::new(&mut run_at_login, "Start in the tray when I log in"),
+            );
+            ui.colored_label(muted(ui), format!("Not possible on this machine: {reason}"));
+        }
+        Some(_) => {
+            if ui
+                .checkbox(&mut run_at_login, "Start in the tray when I log in")
+                .on_hover_text(
+                    "The program starts hidden, so nothing to schedule is missed by                      having the window shut.",
+                )
+                .changed()
+            {
+                intents.push(Intent::SetRunAtLogin(run_at_login));
+            }
+        }
+    }
+    if let Some(note) = app.startup_note() {
+        ui.colored_label(muted(ui), RichText::new(note).small());
+    }
+    if let Some(note) = app.start_note() {
+        ui.colored_label(bad(ui), note);
+    }
+
+    ui.add_space(10.0);
+    ui.label(RichText::new("Quitting").strong());
+    ui.colored_label(
+        muted(ui),
+        "A backup that is interrupted keeps whatever it already copied and picks up          where it left off, whether it comes back by hand or on its own schedule.",
+    );
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        if ui
+            .button("Quit now")
+            .on_hover_text("Stop the program, and any backup still running.")
+            .clicked()
+        {
+            intents.push(Intent::Quit);
+        }
+        if ui.button("Close").clicked() {
+            intents.push(Intent::DismissModal);
+        }
+    });
 }
 
 fn adb_status_text(app: &App) -> String {

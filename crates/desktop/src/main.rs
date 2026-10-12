@@ -108,17 +108,18 @@ fn run(paths: android_backup_core::config::AppPaths, hidden: bool) -> Result<(),
     let cfg = AppConfig::load(&paths.config_file);
     tracing::info!(config_existed, "configuration loaded");
 
-    // Bring the login entry in line with the configuration before the window
-    // opens (E09.5). Declarative: `background.run_at_login` says whether it is
-    // wanted, and this makes the desktop agree — which is also what repairs an
-    // entry the user removed by hand, and what removes one they turned off.
-    // Failure is logged and nothing else: an autostart entry is a convenience.
-    match autostart::current_exe() {
-        Ok(exe) => {
-            autostart::reconcile_from_config(cfg.background.run_at_login, exe);
+    // The login entry (E09.5). The handle is built here — only this process knows
+    // which binary is running, and a portable copy must point at itself — and the
+    // application then owns it: it brings the desktop in line with the configuration
+    // at startup and changes it again whenever the settings panel is used. A machine
+    // with no mechanism for one yields no handle, and the panel says so.
+    let startup: Option<Arc<dyn autostart::Startup>> = match autostart::current_exe() {
+        Ok(exe) => Some(Arc::from(autostart::for_this_platform(exe))),
+        Err(err) => {
+            tracing::warn!(%err, "run at login: not available");
+            None
         }
-        Err(err) => tracing::warn!(%err, "run at login: not checked"),
-    }
+    };
 
     // A missing adb is a normal state here, not a startup failure: the UI shows
     // the "ADB not found" modal and offers the three routes out (E06.6).
@@ -193,6 +194,7 @@ fn run(paths: android_backup_core::config::AppPaths, hidden: bool) -> Result<(),
         tray: Some(Box::new(android_backup_desktop::tray::spawn)),
         // Automation is on when the application runs unattended (E09.3).
         automation: true,
+        startup,
     };
 
     let mut app = android_backup_desktop::app::App::new(deps);

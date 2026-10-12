@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use android_backup_core::adb::installer::{Progress as InstallProgress, Stage as InstallStage};
+use android_backup_core::automation::Schedule;
 use android_backup_core::backup::controller::{JobPhase, StartError};
 use android_backup_core::backup::{JobEvent, JobOutcome, PauseReason, Progress};
 use android_backup_core::database::devices::DeviceRow;
@@ -156,6 +157,141 @@ pub fn last_backup_line(row: Option<&JobRow>) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Automatic backups (E09.6)
+// ---------------------------------------------------------------------------
+//
+// The panel's one line about automation. It is here, next to the other
+// formatters, because it is the *only* place that turns a schedule into words: the
+// settings control writes a [`Schedule`], the engine acts on the same value, and
+// this says what will happen. Nothing decides anything a second time — the rule
+// for "when is it due" is the core's `Schedule::next_due` — so the panel cannot
+// promise a time the clock would not honour.
+
+/// What the device looks like *now*, from automation's point of view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoNow {
+    /// Connected, and the gate would let a backup start.
+    Ready,
+    /// Connected but refused, with the gate's own words — the same strings the
+    /// Start button's tooltip uses, so one problem reads one way.
+    Blocked(String),
+    /// Not connected, or not usable at all (unplugged, offline, unauthorized).
+    Away,
+}
+
+/// Everything [`auto_status_line`] needs, gathered by the app so the renderer
+/// never touches the manifest or the clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoStatus<'a> {
+    pub schedule: Schedule,
+    /// `started_at` of the most recent job on record, which is what the interval
+    /// counts from — an attempt, not a completion.
+    pub last_attempt: Option<&'a str>,
+    pub now_unix: i64,
+    pub device_name: &'a str,
+    pub now: AutoNow,
+    /// The brake the tray switches (E09.5), which the panel must not contradict.
+    pub paused: bool,
+}
+
+/// The settings panel's automation line: what will happen, and — when it will not
+/// happen now — why.
+///
+/// "Why" comes from two different places and both are said out loud: the brake
+/// (paused) is a choice the user made and can undo, while a gate refusal is a phone
+/// that is not ready, in the gate's own words.
+pub fn auto_status_line(status: &AutoStatus<'_>) -> String {
+    let mut line = match status.schedule {
+        Schedule::Off => "Automatic backup is off for this device.".to_string(),
+        Schedule::OnConnect => match &status.now {
+            AutoNow::Blocked(why) => format!(
+                "Starts by itself whenever {} is connected. Not yet: {why}",
+                status.device_name
+            ),
+            _ => format!(
+                "Starts by itself whenever {} is connected.",
+                status.device_name
+            ),
+        },
+        Schedule::EveryHours(_) => {
+            let gap = next_gap_secs(status.schedule, status.last_attempt, status.now_unix);
+            match (gap, &status.now) {
+                (Some(0), AutoNow::Blocked(why)) => {
+                    format!("An automatic backup is due now. Not yet: {why}")
+                }
+                (Some(0), AutoNow::Away) => format!(
+                    "An automatic backup is due — it starts as soon as {} is connected.",
+                    status.device_name
+                ),
+                (Some(0), AutoNow::Ready) => "An automatic backup is due now.".to_string(),
+                (Some(gap), AutoNow::Blocked(why)) => format!(
+                    "Next automatic backup in {}. Not yet: {why}",
+                    format_gap(gap)
+                ),
+                (Some(gap), AutoNow::Away) => format!(
+                    "Next automatic backup in {}, while {} is connected.",
+                    format_gap(gap),
+                    status.device_name
+                ),
+                (Some(gap), AutoNow::Ready) => {
+                    format!("Next automatic backup in {}.", format_gap(gap))
+                }
+                // `next_gap_secs` answers for every `EveryHours`; the arm exists so
+                // that a later variant of the schedule cannot make this silent.
+                (None, _) => "Automatic backup is off for this device.".to_string(),
+            }
+        }
+    };
+    if status.paused && status.schedule != Schedule::Off {
+        line =
+            format!("Automatic backups are paused from the tray, so this will not run yet. {line}");
+    }
+    line
+}
+
+/// Seconds until the next run of an interval schedule, `Some(0)` when it is due.
+///
+/// The arithmetic is the core's, and it cancels out the anchor it is measured
+/// against: a wall-clock timestamp and "now" are turned into instants on one
+/// temporary clock, so a suspend/resume or a system clock that moved cannot
+/// change the answer. The line is therefore a pure function of its inputs, and
+/// the tests pin it.
+fn next_gap_secs(schedule: Schedule, last_attempt: Option<&str>, now_unix: i64) -> Option<i64> {
+    if !matches!(schedule, Schedule::EveryHours(_)) {
+        return None;
+    }
+    let anchor = std::time::Instant::now();
+    // The last attempt as an instant on the same temporary clock as `now`: the
+    // interval is measured in wall-clock seconds, so the gap is `interval` minus
+    // the seconds since the attempt, whatever the anchor is.
+    let last = last_attempt
+        .and_then(android_backup_core::clock::iso_to_unix)
+        .map(|then| {
+            let elapsed = now_unix.saturating_sub(then).max(0) as u64;
+            anchor - Duration::from_secs(elapsed)
+        });
+    let due = schedule.next_due(last, anchor)?;
+    Some(due.saturating_duration_since(anchor).as_secs() as i64)
+}
+
+/// "2 h 05 m", "45 m", "less than a minute" — how long a wait feels, at the
+/// precision someone deciding whether to wait for it cares about.
+pub fn format_gap(secs: i64) -> String {
+    let secs = secs.max(0);
+    if secs == 0 {
+        return "now".to_string();
+    }
+    if secs < 60 {
+        return "less than a minute".to_string();
+    }
+    let minutes = secs / 60;
+    if minutes < 60 {
+        return format!("{minutes} m");
+    }
+    format!("{} h {:02} m", minutes / 60, minutes % 60)
+}
+
 /// Cells of one history row: started, duration, status, copied/unchanged/failed,
 /// bytes. Kept as data so the table and the tests see the same strings.
 pub fn history_cells(row: &JobRow) -> [String; 5] {
@@ -262,6 +398,31 @@ impl DeviceView {
     /// Actionable help for a device that cannot be backed up.
     pub fn gate_message(&self) -> Option<String> {
         self.gate.as_ref().map(|err| err.to_string())
+    }
+
+    /// This device's schedule, as the manifest has it.
+    pub fn schedule(&self) -> Schedule {
+        self.row
+            .as_ref()
+            .map(|row| row.auto_schedule)
+            .unwrap_or(Schedule::Off)
+    }
+
+    /// What automation sees right now: a device that can start, one the gate
+    /// refuses (with the gate's words), or one that simply is not here.
+    ///
+    /// An unplugged phone is [`AutoNow::Away`], never "blocked": its gate error is
+    /// "plug it back in", which is not something the user has to fix before a
+    /// schedule can run — it *is* the schedule's waiting room.
+    pub fn auto_now(&self) -> AutoNow {
+        match (self.state, self.gate.as_ref()) {
+            (DeviceState::Disconnected, _) => AutoNow::Away,
+            (DeviceState::Connected, None) => AutoNow::Ready,
+            (_, Some(err)) => AutoNow::Blocked(err.to_string()),
+            // A state we cannot explain (no gate error to quote): say nothing about
+            // why, because nothing is what we know.
+            (_, None) => AutoNow::Away,
+        }
     }
 }
 
@@ -495,6 +656,8 @@ pub enum ModalKind {
     AdbInstalling,
     ServerConflict,
     Error,
+    /// The application-level background settings: tray, login entry, quitting.
+    Background,
 }
 
 /// A modal dialog. Content is data; [`crate::ui`] renders and resolves it.
@@ -517,6 +680,11 @@ pub enum Modal {
     ServerConflict { message: String },
     /// Anything else that needs the user's attention.
     Error { title: String, message: String },
+    /// Background operation (E09.6): whether closing hides or quits, whether the
+    /// program starts at login, and the way out of a window whose close button hides
+    /// it. Content-free: everything it shows is read from the application, so there is
+    /// no copy of the settings to go stale.
+    Background,
 }
 
 impl Modal {
@@ -527,6 +695,7 @@ impl Modal {
             Self::AdbInstalling { .. } => ModalKind::AdbInstalling,
             Self::ServerConflict { .. } => ModalKind::ServerConflict,
             Self::Error { .. } => ModalKind::Error,
+            Self::Background => ModalKind::Background,
         }
     }
 
@@ -537,6 +706,7 @@ impl Modal {
             Self::AdbInstalling { .. } => "Installing adb",
             Self::ServerConflict { .. } => "ADB server problem",
             Self::Error { title, .. } => title,
+            Self::Background => "Background & automatic backups",
         }
     }
 
@@ -1003,6 +1173,173 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             last_seen_at: "2026-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    #[test]
+    fn gap_wording_is_what_someone_waiting_would_say() {
+        assert_eq!(format_gap(0), "now");
+        assert_eq!(format_gap(-5), "now");
+        assert_eq!(format_gap(1), "less than a minute");
+        assert_eq!(format_gap(59), "less than a minute");
+        assert_eq!(format_gap(60), "1 m");
+        assert_eq!(format_gap(45 * 60), "45 m");
+        assert_eq!(format_gap(3600), "1 h 00 m");
+        assert_eq!(format_gap(2 * 3600 + 5 * 60), "2 h 05 m");
+        assert_eq!(format_gap(72 * 3600), "72 h 00 m");
+    }
+
+    /// A status line, built the way the panel builds one.
+    fn status(schedule: Schedule, last_attempt: Option<&str>, now: AutoNow) -> String {
+        auto_status_line(&AutoStatus {
+            schedule,
+            last_attempt,
+            now_unix: 1_800_000_000,
+            device_name: "Pixel 8",
+            now,
+            paused: false,
+        })
+    }
+
+    #[test]
+    fn the_off_line_does_not_pretend_anything_will_happen() {
+        let line = status(Schedule::Off, None, AutoNow::Ready);
+        assert_eq!(line, "Automatic backup is off for this device.");
+        // Off is off even while the phone sits there ready.
+        assert_eq!(line, status(Schedule::Off, None, AutoNow::Ready));
+    }
+
+    #[test]
+    fn on_connect_says_when_and_why_not() {
+        assert_eq!(
+            status(Schedule::OnConnect, None, AutoNow::Away),
+            "Starts by itself whenever Pixel 8 is connected."
+        );
+        assert_eq!(
+            status(Schedule::OnConnect, None, AutoNow::Ready),
+            "Starts by itself whenever Pixel 8 is connected."
+        );
+        let blocked = status(
+            Schedule::OnConnect,
+            None,
+            AutoNow::Blocked("approve the USB debugging prompt".to_string()),
+        );
+        assert!(blocked.starts_with("Starts by itself"), "{blocked}");
+        assert!(
+            blocked.ends_with("Not yet: approve the USB debugging prompt"),
+            "{blocked}"
+        );
+    }
+
+    #[test]
+    fn the_interval_line_counts_down_from_the_last_attempt() {
+        let now = 1_800_000_000;
+        let six_hours = Schedule::EveryHours(6);
+        // Four hours after the last attempt: two to go. The timestamp is built
+        // from the same `now` the panel is told, so the text is exact.
+        let started = android_backup_core::clock::unix_to_iso(now - 4 * 3600);
+        assert_eq!(
+            status(six_hours, Some(&started), AutoNow::Ready),
+            "Next automatic backup in 2 h 00 m."
+        );
+        // Never attempted: due immediately, which is what makes turning this on
+        // mean "start now".
+        assert_eq!(
+            status(six_hours, None, AutoNow::Ready),
+            "An automatic backup is due now."
+        );
+        // Past due and unplugged: due, and it says what it is waiting for.
+        let long_ago = android_backup_core::clock::unix_to_iso(now - 100 * 3600);
+        assert_eq!(
+            status(six_hours, Some(&long_ago), AutoNow::Away),
+            "An automatic backup is due — it starts as soon as Pixel 8 is connected."
+        );
+        assert_eq!(
+            status(six_hours, None, AutoNow::Away),
+            "An automatic backup is due — it starts as soon as Pixel 8 is connected."
+        );
+        assert_eq!(
+            status(
+                six_hours,
+                Some(&long_ago),
+                AutoNow::Blocked("the phone is locked".to_string())
+            ),
+            "An automatic backup is due now. Not yet: the phone is locked"
+        );
+        // Due in the future but blocked: both facts, in that order.
+        assert_eq!(
+            status(
+                six_hours,
+                Some(&started),
+                AutoNow::Blocked("the phone is locked".to_string())
+            ),
+            "Next automatic backup in 2 h 00 m. Not yet: the phone is locked"
+        );
+    }
+
+    #[test]
+    fn the_interval_line_rejects_a_hand_edited_timestamp_instead_of_lying() {
+        let six_hours = Schedule::EveryHours(6);
+        // A row whose `started_at` cannot be read counts as "never attempted":
+        // due now, rather than a countdown from a time nobody can place.
+        assert_eq!(
+            status(six_hours, Some("not a timestamp"), AutoNow::Ready),
+            "An automatic backup is due now."
+        );
+    }
+
+    #[test]
+    fn a_paused_schedule_says_so_before_it_says_anything_else() {
+        let line = auto_status_line(&AutoStatus {
+            schedule: Schedule::OnConnect,
+            last_attempt: None,
+            now_unix: 1_800_000_000,
+            device_name: "Pixel 8",
+            now: AutoNow::Ready,
+            paused: true,
+        });
+        assert!(line.starts_with("Automatic backups are paused"), "{line}");
+        assert!(line.contains("Starts by itself"), "{line}");
+        // A device nobody automates is not affected by the brake, so it is not
+        // mentioned: the pause is about work that would otherwise happen.
+        let off = auto_status_line(&AutoStatus {
+            schedule: Schedule::Off,
+            last_attempt: None,
+            now_unix: 1_800_000_000,
+            device_name: "Pixel 8",
+            now: AutoNow::Ready,
+            paused: true,
+        });
+        assert_eq!(off, "Automatic backup is off for this device.");
+    }
+
+    #[test]
+    fn the_view_reports_what_automation_would_see() {
+        let mut view = ViewState::new("adb 35.0.0");
+        view.apply_device_event(&DeviceEvent::FirstSeen(info(
+            "SER1",
+            DeviceState::Connected,
+            Some("SM-A536B"),
+        )));
+        assert_eq!(view.device("SER1").unwrap().auto_now(), AutoNow::Ready);
+        assert_eq!(view.device("SER1").unwrap().schedule(), Schedule::Off);
+
+        view.apply_row(row(1, "SER1", "Phone"));
+        assert_eq!(view.device("SER1").unwrap().schedule(), Schedule::Off);
+
+        view.apply_device_event(&DeviceEvent::Unauthorized(info(
+            "SER1",
+            DeviceState::Unauthorized,
+            Some("SM-A536B"),
+        )));
+        match view.device("SER1").unwrap().auto_now() {
+            AutoNow::Blocked(why) => assert!(why.contains("approve"), "{why}"),
+            other => panic!("expected a blocked device, got {other:?}"),
+        }
+
+        view.apply_device_event(&DeviceEvent::Disconnected {
+            serial: "SER1".to_string(),
+        });
+        assert_eq!(view.device("SER1").unwrap().auto_now(), AutoNow::Away);
     }
 
     #[test]

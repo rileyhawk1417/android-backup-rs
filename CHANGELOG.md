@@ -39,6 +39,13 @@ New work starts from the wave documents, per the "deferred" list in
   Linux `.desktop` file) brings the tray app up hidden; a second launch is
   refused through a lock file next to the manifest, so two copies can never write
   the same manifest.
+- **Schedules and status in the app.** Each device's panel shows and edits its own
+  schedule and says what automation is doing with it — "Next automatic backup in
+  2 h 05 m", "starts when the phone is connected", "an automatic backup is due now" —
+  and a **Background** dialog covers close-to-tray, starting at login and quitting for
+  good, including what the desktop actually did about the login entry. The first-run
+  wizard asks once whether new phones should back up on their own, and the answer
+  applies to phones plugged in later rather than rewriting what was already chosen.
 - **OS notifications.** Toasts announce an automatic backup starting, a job
   finishing, and anything that needs attention, with the same wording the panel
   uses. Repeat toasts are coalesced per device and kind, and they are paced so a

@@ -30,5 +30,10 @@ dirs.workspace = true
 notify-rust.workspace = true
 tray-icon.workspace = true
 
+# Only to ask the dynamic loader whether the appindicator library exists, which the
+# tray crate would otherwise find out by panicking (see `tray::indicator_library`).
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.8"
+
 [dev-dependencies]
 tempfile.workspace = true

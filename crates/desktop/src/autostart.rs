@@ -445,14 +445,6 @@ impl Startup for WindowsRunKey {
     }
 }
 
-/// Was the entry asked for in the configuration, and is it in place? For `main`.
-pub fn reconcile_from_config(wanted: bool, exe: PathBuf) -> Reconciled {
-    let startup = for_this_platform(exe);
-    let outcome = reconcile(wanted, startup.as_ref());
-    tracing::info!(location = %startup.location(), "{}", outcome.summary());
-    outcome
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
