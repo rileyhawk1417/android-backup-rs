@@ -6,6 +6,10 @@
 //! shell getprop  ──▶ fetch_device_props ──▶ DeviceProps┘        │
 //!                                                               ▼
 //!                                                     DeviceSink (the manifest)
+//!
+//! (`DeviceSnapshot` above is `adb`'s parse type — one listing entry. The
+//! watcher's live device list is [`DeviceSnapshotHandle`], a different thing
+//! with an unfortunately similar name.)
 //! ```
 //!
 //! Two seams keep this layer honest:
@@ -25,7 +29,7 @@ pub mod watcher;
 pub use backup_gate::{check, check_watcher, GateError};
 pub use profile::{validate_display_name, validate_folder_path, ProfileError, ProfileService};
 pub use state::DeviceState;
-pub use watcher::{DeviceEvent, DeviceWatcher, WatcherConfig};
+pub use watcher::{DeviceEvent, DeviceSnapshotHandle, DeviceWatcher, WatcherConfig};
 
 use std::sync::Arc;
 

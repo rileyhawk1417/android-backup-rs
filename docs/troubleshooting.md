@@ -20,6 +20,7 @@ says where it is and what to include.
 - [14. Some folders always fail](#14-some-folders-always-fail)
 - [15. Reading the log, and what to send in a bug report](#15-reading-the-log-and-what-to-send-in-a-bug-report)
 - [16. Windows SmartScreen, and Linux artifacts that will not start](#16-windows-smartscreen-and-linux-artifacts-that-will-not-start)
+- [17. No notification appeared when a backup started or finished](#17-no-notification-appeared-when-a-backup-started-or-finished)
 
 ---
 
@@ -321,3 +322,31 @@ trim.
   than your distribution provides. See [setup §3](setup.md#3-install--linux) —
   the release notes record the floor each artifact was built against, and
   building from source is the other way out.
+
+## 17. No notification appeared when a backup started or finished
+
+Notifications are for work that happens while you are not looking at the app —
+a backup that starts on its own when you plug the phone in, or a job that
+finishes or gets stuck in the background. Nothing is lost when a toast does not
+appear; the panel, the history and the log are the record, and this is
+decoration over them.
+
+- **The app's window is on screen.** Success notifications are suppressed on
+  purpose: the panel is already showing you the same thing and a toast over your
+  own window is noise. Paused and failed notifications are never suppressed.
+- **Windows: Focus Assist / Do Not Disturb.** Toasts are subject to notification
+  settings like any other app's, so they can be silenced by an active focus
+  session or by turning the app off in **Settings → System → Notifications**.
+  Check there first, then check the Action Center — a suppressed toast that
+  arrived while you were in a focus session is usually still in the list.
+- **Windows: the toasts say the generic host process name.** The app asks Windows
+  to show them under its own identity, which needs a Start Menu shortcut to be
+  registered by an installer. Unpacked from the ZIP, Windows may attribute them
+  to the binary instead. The text is still correct.
+- **Linux: nothing appears at all.** Toasts go over the session bus to your
+  desktop's notification daemon. On a bare window manager, or over SSH, there is
+  no daemon and nothing is shown; the log records the attempt. GNOME's own
+  quirks here are accepted (see [wave 9](plan/wave-9-automation.md)).
+- **A repeat was coalesced.** The same kind of news about the same phone within a
+  minute is collapsed into one toast, so flapping the cable or a job that pauses
+  twice quickly does not stack notifications.

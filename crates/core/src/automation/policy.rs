@@ -480,7 +480,8 @@ mod tests {
         /// placed before or after it without depending on how long this machine
         /// happens to have been up.
         origin: Instant,
-        schedules: HashMap<String, Schedule>,        last_attempt: RefCell<HashMap<String, Instant>>,
+        schedules: HashMap<String, Schedule>,
+        last_attempt: RefCell<HashMap<String, Instant>>,
         paused: RefCell<HashMap<String, PausedJob>>,
         /// Answers for the next `start`/`resume` calls; exhausted → `Ok`.
         answers: RefCell<VecDeque<Result<(), AttemptError>>>,

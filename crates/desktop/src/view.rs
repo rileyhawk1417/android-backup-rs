@@ -417,11 +417,7 @@ impl JobView {
     /// the fatal message. `true` marks it as a problem (drawn in red).
     pub fn strip(&self) -> Option<(String, bool)> {
         if let Some(outcome) = &self.outcome {
-            let counters = &outcome.counters;
-            let detail = format!(
-                "{} copied, {} unchanged, {} failed",
-                counters.copied, counters.skipped, counters.failed
-            );
+            let detail = outcome_detail(outcome);
             if outcome.succeeded() {
                 return Some((
                     format!(
@@ -431,14 +427,11 @@ impl JobView {
                     false,
                 ));
             }
-            let reason = outcome
-                .error_summary
-                .clone()
-                .unwrap_or_else(|| status_label(outcome.status).to_string());
             return Some((
                 format!(
-                    "Backup {} — {detail} ({reason})",
-                    status_label(outcome.status).to_lowercase()
+                    "Backup {} — {detail} ({})",
+                    status_label(outcome.status).to_lowercase(),
+                    outcome_reason(outcome)
                 ),
                 true,
             ));
@@ -925,6 +918,28 @@ impl From<&StartError> for StartBlock {
     fn from(err: &StartError) -> Self {
         Self::Running(err.to_string())
     }
+}
+
+/// What a finished job did, as one clause: `412 copied, 1203 unchanged, 0 failed`.
+///
+/// Shared by the panel's strip and by the OS notification
+/// (`notifications::Notice::finished`), so a toast can never disagree with the
+/// window about what a backup did.
+pub fn outcome_detail(outcome: &JobOutcome) -> String {
+    format!(
+        "{} copied, {} unchanged, {} failed",
+        outcome.counters.copied, outcome.counters.skipped, outcome.counters.failed
+    )
+}
+
+/// Why a job that did not succeed stopped: the engine's own message when it left
+/// one, otherwise the status name. Shared with the notification, like
+/// [`outcome_detail`].
+pub fn outcome_reason(outcome: &JobOutcome) -> String {
+    outcome
+        .error_summary
+        .clone()
+        .unwrap_or_else(|| status_label(outcome.status).to_string())
 }
 
 /// A short, human summary of the plan for the log and the status bar.

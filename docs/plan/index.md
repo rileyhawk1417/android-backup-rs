@@ -304,13 +304,29 @@ Decisions taken while building this wave:
 
 - [x] E09.1 Schedule model
 - [x] E09.2 Auto-backup on connection — `core::automation::policy`, the whole
-      rulebook behind a `Host` port, tested against a scripted timeline. The
-      `Host` implementation over the manifest + gate + controller, and the
-      "a resumed job copies only the remainder" integration test, land with the
-      E09.3/E09.5 wiring (see the wave doc's "Left to the wiring").
-- [ ] E09.3 Interval scheduler driver
-- [ ] E09.4 OS notifications
-- [ ] E09.5 System tray & close-to-tray
+      rulebook behind a `Host` port, tested against a scripted timeline, plus the
+      real wiring (`desktop::automation::AppHost` over the manifest + gate +
+      controller) and `crates/core/tests/automation_resume.rs`, which drives the
+      policy through an interrupted copy and a reconnect and proves the *same*
+      job finishes with only the remainder pulled.
+- [x] E09.3 Interval scheduler driver — `core::automation::driver`: one clock
+      thread, a stoppable `Condvar` wait, and a tick that respects the same policy
+      lock the UI takes. Waits *after* work, so ticks cannot pile up. The app
+      implements its `TickHost`; the interval comes from `automation.tick_interval_secs`.
+- [x] E09.4 OS notifications — `desktop::notifications`: one `Notice` payload per
+      event (so tests assert the text, not a daemon), a `Notifier` trait, the
+      delivery policy (success suppressed while the window is visible, trouble
+      never suppressed, repeats coalesced per device and kind for 60s), and a
+      worker thread that paces toasts and drops overflow rather than blocking the
+      UI. `notify-rust` with its pure-Rust zbus backend on Linux, AppUserModelID on
+      Windows. `AutomationToasts` is the driver's sink; `RecordingNotifier` is how
+      tests read the payloads.
+- [x] E09.5 System tray & close-to-tray — `desktop::tray` (icons drawn in code,
+      `TrayHandle` seam, menu → `Intent`s), close-to-tray by default and
+      best-effort (no icon still means a working window), `desktop::autostart`
+      reconciled at startup, `--hidden` for the login entry, single instance via a
+      `File::try_lock` on `instance.lock`. Quit cancels live jobs before joining,
+      so nothing is left for the next launch to "recover".
 - [ ] E09.6 Settings & status UI
 - [ ] E09.7 Docs, packaging, release (wave gate)
 

@@ -6,9 +6,46 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
-Nothing yet. New work starts from the wave documents in `docs/plan/`, per the
-"deferred" list in `docs/overview_plan.md` §13 (scheduling, notifications,
-restore).
+Wave 9 (automation: scheduling, auto-backup on connection, background operation)
+is in progress and targets 0.2.0; the tasks, their order and what has landed so
+far are tracked in `docs/plan/wave-9-automation.md` and `docs/plan/index.md`.
+New work starts from the wave documents, per the "deferred" list in
+`docs/overview_plan.md` §13 (scheduling, notifications, restore).
+
+### Added
+
+- **Per-device schedules.** Each profile can be set to back up when the phone is
+  connected or every N hours, or left off; automation is opt-in per device. The
+  schedule is stored with the profile (`devices.auto_schedule_kind` /
+  `auto_schedule_hours`, manifest migration v2) and 0.1.0 manifests upgrade in
+  place without losing a row.
+- **Automatic backup on connection and on the clock.** A phone that is connected
+  and due starts the same job the Start button starts — through the same gate,
+  with the same destination and folder resolution — recorded as
+  `trigger = auto`. Manual backups always win: `DeviceBusy` means automation
+  stays quiet rather than queueing behind a person's job.
+- **Automatic resume, scoped to automation's own work.** A job that automation
+  started and that was interrupted (cable out, phone asleep, USB debugging
+  revoked) resumes when the phone is ready again, continuing the *same* job from
+  the manifest, so only the remainder is pulled. A job a person started keeps
+  waiting for that person's Resume.
+- **Background operation from the tray.** Closing the window hides it to a tray
+  icon; the device watcher and the automation driver keep working while the
+  window is hidden. The tray menu offers Open, Back up all connected now,
+  Pause/Resume automation and Quit, and the icon shows idle / running /
+  needs-attention. Where no tray icon can be created the app still runs with its
+  window, so the tray is never load-bearing.
+- **Run at login and single instance.** An optional login entry (Windows Run key,
+  Linux `.desktop` file) brings the tray app up hidden; a second launch is
+  refused through a lock file next to the manifest, so two copies can never write
+  the same manifest.
+- **OS notifications.** Toasts announce an automatic backup starting, a job
+  finishing, and anything that needs attention, with the same wording the panel
+  uses. Repeat toasts are coalesced per device and kind, and they are paced so a
+  flapping phone cannot produce a toast storm.
+- **Quit means stop.** Quitting cancels live jobs cooperatively, joins the job
+  and driver threads, and leaves the manifest consistent — an exit no longer
+  looks like a crash for the next launch to recover.
 
 ## [0.1.0]
 

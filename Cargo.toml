@@ -8,7 +8,9 @@ members = ["crates/core", "crates/desktop"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-rust-version = "1.85"
+# 1.89 is notify-rust's floor; the desktop crate needs it for OS notifications
+# (Wave 9). Nothing else in the workspace uses anything newer than 1.85.
+rust-version = "1.89"
 
 [workspace.dependencies]
 core = { path = "crates/core", package = "android-backup-core" }
@@ -35,6 +37,14 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.33"
 rfd = "0.15"
+# OS notifications (Wave 9, E09.4). `z` is the pure-Rust zbus backend on
+# Linux — no libdbus headers to install, and Windows uses the WinRT toast API.
+notify-rust = { version = "4", default-features = false, features = ["z"] }
+# The system tray (Wave 9, E09.5). `gtk` is the Linux backend (StatusNotifierItem
+# through libappindicator) and is inert on Windows, where the crate talks to the
+# shell directly. `libxdo` is deliberately off: it is X11 input simulation, which
+# a tray icon has no business doing.
+tray-icon = { version = "0.24", default-features = false, features = ["gtk"] }
 tempfile = "3"
 
 [workspace.lints.clippy]

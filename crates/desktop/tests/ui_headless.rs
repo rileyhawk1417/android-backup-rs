@@ -48,7 +48,17 @@ fn app(dir: &Path) -> (App, Arc<Db>) {
         db: Some(Arc::clone(&db)),
         probe: None::<Arc<dyn FsProbe>>,
         installer: None,
+        // Scripted to cancel: a test rendering frames must not be able to draw a
+        // dialog on the machine running it.
+        picker: Some(android_backup_desktop::testutil::picker(
+            android_backup_desktop::testutil::ScriptedPicker::cancelling(),
+        )),
+        notifier: Some(android_backup_desktop::testutil::recorder()),
         watch_devices: false,
+        // No tray and no clock: this test drives intents by hand, and a tray icon
+        // cannot be drawn on a machine with no desktop at all.
+        tray: None,
+        automation: false,
     });
     (app, db)
 }

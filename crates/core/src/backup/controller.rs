@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use crate::clock;
 use crate::database::devices::DeviceRow;
+use crate::database::jobs::JobTrigger;
 use crate::database::{jobs, Db, DbError};
 
 use super::destination::{self, FsProbe};
@@ -238,6 +239,22 @@ impl BackupController {
     /// folder was deleted) and the engine must not find that out halfway through
     /// the first file.
     pub fn start(&self, device: &DeviceRow, config: JobConfig) -> Result<JobHandle, StartError> {
+        self.start_as(device, config, JobTrigger::Manual)
+    }
+
+    /// Start a backup and record *who* asked for it.
+    ///
+    /// The trigger is durable and decides what may be resumed automatically
+    /// (E09.2): a job a person started keeps waiting for that person, and only a
+    /// job automation started is automation's to continue. Everything else about
+    /// the two kinds of start is identical — same gate at the call site, same
+    /// engine, same row.
+    pub fn start_as(
+        &self,
+        device: &DeviceRow,
+        config: JobConfig,
+        trigger: JobTrigger,
+    ) -> Result<JobHandle, StartError> {
         self.prune_finished();
 
         {
@@ -267,7 +284,7 @@ impl BackupController {
 
         // The row is created here so the handle can carry a stable id, and so a
         // crashed run leaves a `planning` row that recovery will close.
-        let job_id = jobs::insert_job(&self.shared.db, device.id, &clock::now_iso())?;
+        let job_id = jobs::insert_job_as(&self.shared.db, device.id, &clock::now_iso(), trigger)?;
 
         let control = RunControl::new();
         let phase = Arc::new(Mutex::new(JobPhase::Starting));

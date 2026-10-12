@@ -29,18 +29,87 @@ pub enum AdbMode {
 
 pub const CONFIG_VERSION: u32 = 1;
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 4;
+/// How often the automation clock wakes (E09.3). A minute is plenty: the
+/// schedules it serves are measured in hours, and the tick is cheap enough that
+/// being wrong about this costs nothing but a little idle CPU.
+pub const DEFAULT_AUTOMATION_TICK_SECS: u64 = 60;
 const CONFIG_FILE_NAME: &str = "config.toml";
 const APP_DIR_NAME: &str = "android-backup";
 
 /// Automation defaults (Wave 9).
 ///
-/// Per-device intent lives in the manifest (`devices.auto_backup`); this is only
-/// the schedule a *new* device is offered, so a hand-edited file can never
-/// enrol a device behind the user's back.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// Per-device intent lives in the manifest (E09.1's `auto_schedule_kind` /
+/// `auto_schedule_hours`); this is only the schedule a *new* device is offered,
+/// so a hand-edited file can never enrol a device behind the user's back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutomationConfig {
     #[serde(default)]
     pub default_schedule: Schedule,
+    /// How often the automation clock wakes, in seconds. Zero — which a
+    /// hand-edited file can contain — means "as fast as is sane", not "spin".
+    #[serde(default = "default_automation_tick")]
+    pub tick_interval_secs: u64,
+    /// Automation switched off from the tray, without forgetting anybody's
+    /// schedule: a brake, not a reset. Persisted so that "pause" survives a
+    /// restart — a brake that releases itself when the window is closed is not
+    /// one, and the user pressed it precisely because the app runs unattended.
+    #[serde(default)]
+    pub paused: bool,
+}
+
+impl Default for AutomationConfig {
+    fn default() -> Self {
+        Self {
+            default_schedule: Schedule::default(),
+            tick_interval_secs: DEFAULT_AUTOMATION_TICK_SECS,
+            paused: false,
+        }
+    }
+}
+
+fn default_automation_tick() -> u64 {
+    DEFAULT_AUTOMATION_TICK_SECS
+}
+
+/// How the application behaves when nobody is looking at it (Wave 9, E09.5).
+///
+/// Separate from [`AutomationConfig`] on purpose: "do not back up behind my
+/// back" and "keep running when I close the window" are different promises, and a
+/// user who wants the tray but no automatic backups must not have to choose.
+///
+/// The defaults are the cautious ones for automation (`Off` above) and the
+/// convenient ones here: closing the window has always kept the tray app alive for
+/// a backup in flight, and a first run in 0.1.0 had no tray at all, so nothing that
+/// ran before changes behaviour except by the user's own hand.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundConfig {
+    /// Closing the window hides it to the tray instead of quitting. Automation
+    /// then keeps working, which is the whole point of the tray.
+    #[serde(default = "default_true")]
+    pub close_to_tray: bool,
+    /// Show the tray icon at all. A user who wants the window to be the only
+    /// surface can turn it off; closing then quits, as it did before Wave 9.
+    #[serde(default = "default_true")]
+    pub tray_icon: bool,
+    /// Start the application when the user logs in. Off by default: an
+    /// application that installs itself into a login session unasked is
+    /// malware, however convenient it is.
+    #[serde(default)]
+    pub run_at_login: bool,
+}
+
+impl Default for BackgroundConfig {
+    fn default() -> Self {
+        Self {
+            close_to_tray: true,
+            tray_icon: true,
+            run_at_login: false,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Everything the application needs to know, persisted as TOML.
@@ -61,6 +130,9 @@ pub struct AppConfig {
     /// Automation defaults; missing in a 0.1.0 file, hence the serde default.
     #[serde(default)]
     pub automation: AutomationConfig,
+    /// Tray, close-to-tray and login behaviour; also missing in a 0.1.0 file.
+    #[serde(default)]
+    pub background: BackgroundConfig,
 }
 
 fn default_config_version() -> u32 {
@@ -80,6 +152,7 @@ impl Default for AppConfig {
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             managed_adb_dir: None,
             automation: AutomationConfig::default(),
+            background: BackgroundConfig::default(),
         }
     }
 }
@@ -192,7 +265,10 @@ impl AppConfig {
             })?;
         }
         let text = toml::to_string_pretty(&cfg)?;
-        std::fs::write(path, text).map_err(|source| ConfigError::Io {
+        // Written whole or not at all: the file is read back by this application at
+        // the next launch, and by the user in an editor in between, and half a line
+        // of TOML is worse than none.
+        crate::fsx::write_atomic(path, &text).map_err(|source| ConfigError::Io {
             path: path.to_path_buf(),
             source,
         })
@@ -238,6 +314,13 @@ mod tests {
             managed_adb_dir: Some(PathBuf::from("/data/pt")),
             automation: AutomationConfig {
                 default_schedule: Schedule::EveryHours(6),
+                tick_interval_secs: 30,
+                paused: true,
+            },
+            background: BackgroundConfig {
+                close_to_tray: true,
+                tray_icon: true,
+                run_at_login: true,
             },
         };
         cfg.save(&path).unwrap();
@@ -257,6 +340,10 @@ mod tests {
         .unwrap();
         let cfg = AppConfig::load(&path);
         assert_eq!(cfg.automation.default_schedule, Schedule::Off);
+        assert_eq!(
+            cfg.automation.tick_interval_secs, DEFAULT_AUTOMATION_TICK_SECS,
+            "a file from before the clock existed still gets a sane cadence"
+        );
         assert_eq!(cfg.adb_mode, AdbMode::System);
         assert_eq!(cfg.poll_interval_secs, 4);
     }

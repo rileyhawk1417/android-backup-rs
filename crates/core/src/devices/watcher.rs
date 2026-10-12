@@ -251,7 +251,15 @@ impl DeviceWatcher {
 
     /// The device list as of the last successful poll.
     pub fn snapshot(&self) -> Arc<[Arc<DeviceInfo>]> {
-        Arc::clone(&lock(&self.inner.state).latest)
+        lock(&self.inner.state).latest.clone()
+    }
+
+    /// A clonable handle to the same device list, for a thread that does not own
+    /// the watcher — see [`DeviceSnapshotHandle`].
+    pub fn snapshot_handle(&self) -> DeviceSnapshotHandle {
+        DeviceSnapshotHandle {
+            inner: Arc::clone(&self.inner),
+        }
     }
 
     /// False when the most recent poll failed: the snapshot is then the last one
@@ -294,6 +302,53 @@ impl DeviceWatcher {
 impl Drop for DeviceWatcher {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// What the watcher last saw, readable from any thread (Wave 9, E09.3).
+///
+/// The watcher owns a thread and an event channel and therefore cannot be
+/// shared, but this part of it can: it is the same state, not a copy of it. The
+/// automation clock asks it what is plugged in, and the tray (E09.5) will ask it
+/// the same question. Because the watcher is the only writer, nothing here can
+/// fall out of date behind its back — which is exactly what a second, separately
+/// maintained device list would do.
+///
+/// Like [`DeviceWatcher::snapshot`], the answer is always the *last successful*
+/// poll: check [`DeviceSnapshotHandle::last_poll_ok`] before treating an empty list as
+/// "nothing is plugged in".
+#[derive(Clone)]
+pub struct DeviceSnapshotHandle {
+    inner: Arc<Inner>,
+}
+
+impl DeviceSnapshotHandle {
+    /// A handle with no watcher behind it: an empty list that never changes.
+    ///
+    /// For a caller that has no device thread — a window with no `adb`, or a test
+    /// that feeds [`DeviceEvent`](super::DeviceEvent)s by hand. Such a handle reports
+    /// an empty list and [`Self::last_poll_ok`] false forever, so the automation clock
+    /// finds nothing to start (which is true) while the events the caller *does* feed
+    /// still work, because those arrive with their device attached rather than being
+    /// looked up here.
+    pub fn empty() -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                state: Mutex::new(InnerState::new(Duration::from_secs(1))),
+                wake: Condvar::new(),
+            }),
+        }
+    }
+
+    /// Every device the last successful poll listed.
+    pub fn devices(&self) -> Arc<[Arc<DeviceInfo>]> {
+        lock(&self.inner.state).latest.clone()
+    }
+
+    /// False when the most recent poll failed, in which case [`Self::devices`] is
+    /// the last list that worked rather than the current one.
+    pub fn last_poll_ok(&self) -> bool {
+        lock(&self.inner.state).last_poll_ok
     }
 }
 
@@ -932,5 +987,46 @@ mod tests {
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].props.manufacturer.as_deref(), Some("Samsung"));
         assert_eq!(snapshot[0].name_hint(), "Samsung SM-A536B");
+    }
+
+    /// The handle a background thread holds (E09.3's clock) is the watcher's own
+    /// state, not a copy that can fall behind it.
+    #[test]
+    fn a_snapshot_handle_sees_what_the_watcher_sees() {
+        let adb = MockAdb::new()
+            .on(
+                "devices",
+                MockAdb::ok(&listing(&["ABC123\tdevice product:a53x model:SM_A536B"])),
+            )
+            .on(
+                "getprop",
+                MockAdb::ok(&format!(
+                    "Samsung{SEPARATOR}SM_A536B{SEPARATOR}a53x{SEPARATOR}14"
+                )),
+            );
+        let mut watcher = DeviceWatcher::spawn(
+            Arc::new(adb),
+            None,
+            WatcherConfig::default().with_poll_interval(Duration::from_millis(1)),
+        );
+        // Taken *before* the first poll lands, so this is a view and not a copy.
+        let handle = watcher.snapshot_handle();
+        assert!(handle.devices().is_empty());
+        assert!(
+            !handle.last_poll_ok(),
+            "nothing has been polled yet, so the list is not to be trusted"
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while handle.devices().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let seen = handle.devices();
+        assert_eq!(seen.len(), 1, "the handle stayed empty");
+        assert_eq!(seen[0].serial, "ABC123");
+        assert!(handle.last_poll_ok());
+        assert_eq!(watcher.snapshot().len(), seen.len());
+        assert_eq!(watcher.last_poll_ok(), handle.last_poll_ok());
+        watcher.stop();
     }
 }

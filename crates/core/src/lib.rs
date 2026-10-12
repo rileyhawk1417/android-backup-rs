@@ -37,6 +37,7 @@ pub mod config;
 pub mod database;
 pub mod devices;
 pub mod error;
+pub mod fsx;
 pub mod mock;
 pub mod paths;
 pub mod testutil;

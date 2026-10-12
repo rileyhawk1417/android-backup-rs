@@ -221,17 +221,35 @@ start moves the manifest clock, a successful resume un-pauses its job):
   event, a `PollFailed` or a `StateChanged` one changes nothing. A timestamp in
   the future schedules nothing until the clock catches up.
 
-**Left to the wiring (E09.3 / E09.5)** — so this task's accept is not complete
-until those land:
-- The `Host` implementation itself (`AppHost` over the manifest + the gate +
-  `BackupController`), including the "hand it to a worker, never block the
-  watcher thread" rule above.
-- The end-to-end assertion that a resumed job copies *only* the remainder. The
-  policy test can only assert that `resume` was called; the mock remote's read
-  counts belong to an integration test next to the existing resume tests.
+**Wiring (delivered with E09.5)**
+- `desktop::automation::AppHost` implements `Host` over the manifest, the gate
+  and the `BackupController`; it starts and resumes on the driver's thread and
+  never blocks the watcher. `desktop::jobconfig` is the one place that turns a
+  `DeviceRow` into a `JobConfig`, so the button and the policy cannot disagree
+  about destination or folders.
+- `crates/core/tests/automation_resume.rs` closes the second gap: the real
+  `Policy` drives the real controller through an interrupted copy and a
+  reconnect. The resumed job is the *same row* (`trigger = auto`, one job in the
+  history), the file already verified before the slip is not rewritten, and the
+  bytes copied after reconnecting are exactly `b` + `c`. Its companion test pins
+  the other half of the rule: a *manual* paused job is left for the person who
+  started it.
+  - Worth knowing about this job's ledger: `files_copied` counts the job's whole
+    life (1 before the slip + 2 after), and `skipped` counts what *earlier* jobs
+    left behind — so "only the remainder" is proven by the byte delta and the
+    untouched file, not by `skipped`.
 
-## E09.3 Interval scheduler driver (core)
+## E09.3 Interval scheduler driver (core) — **implemented**
 
+
+**What landed.** `core::automation::driver`: an `AutomationDriver` on one
+stoppable thread (a `Condvar` wait, joinable within a tick), a `TickHost`
+extending `Host` with `connected()`, and a `tick_once` that takes the policy lock
+once and then *waits*, so ticks cannot pile up behind a slow gate. The interval
+comes from the config (`automation.tick_interval_secs`, default 60 s, floor 1 ms
+so a test cannot spin). The device list is the watcher's own
+`DeviceSnapshotHandle`, read fresh every tick — nothing about enrollment or
+connection state is cached in the driver.
 **Actions**
 1. New module `core::automation::driver`: one thread, owned by the app,
    ticking once a minute (cheap; configurable in tests):
@@ -258,8 +276,20 @@ until those land:
   `DeviceBusy` (job still live) and stays silent; job completes; 60 m later
   the next fires. Same test with the device unplugged: every tick is a no-op.
 
-## E09.4 OS notifications (desktop)
+## E09.4 OS notifications (desktop) — **implemented**
 
+
+**What landed.** `desktop::notifications`: a `Notifier` trait with `Notice` /
+`NoticeKind` (started, finished, paused, fatal, blocked, attention), a `Delivery`
+policy (progress toasts are suppressed while the window is focused and not
+minimized; paused/fatal are never suppressed), per-device-per-kind coalescing on
+a 60 s window, and a `SystemNotifier` whose `show` is non-blocking (worker thread,
+bounded channel, 300 ms minimum gap) so a toast can never slow or fail a job.
+`RecordingNotifier` in `testutil` asserts payloads head-lessly. The mapping from
+a `JobEvent` to a `Notice` is the pure `job_notice` function, and
+`AutomationToasts` bridges policy notes to toasts, resolving display names from
+the manifest. Windows carries the `AndroidBackup.Desktop` AppUserModelID;
+Focus Assist behaviour is documented in `troubleshooting.md` §17.
 **Actions**
 1. `desktop` (this is a presentation concern — the view model gains the
    decision, the OS crate does the showing):
@@ -304,7 +334,34 @@ until those land:
   same event, second channel; no new view-model states are allowed to appear
   that tests do not cover.
 
-## E09.5 System tray & close-to-tray (desktop)
+## E09.5 System tray & close-to-tray (desktop) — **implemented**
+
+
+**What landed.** `desktop::tray` draws its three icon states in code (idle /
+running / attention — no PNG assets to ship or regenerate) and puts `tray-icon`
++ `muda` behind a `TrayHandle` trait, so menu behaviour is tested against a
+recording sink. Menu clicks become `TrayCommand`s and then the same `Intent`s the
+window widgets emit; the wiring also carries an `egui::Context` so a click on a
+hidden window still produces a repaint. Close-to-tray is the default
+(`background.close_to_tray`), the tray is best-effort (a machine that cannot make
+one still runs with its window), and `--hidden` serves the run-at-login entry.
+Autostart lives in `desktop::autostart` (Windows Run key via `reg.exe`, Linux
+`.desktop` file) and is reconciled from the config at startup — both through
+`core::fsx::write_atomic`, so a crash cannot leave a truncated entry.
+
+**Two decisions worth recording.**
+- **Quit cancels live jobs.** Stopping the driver and joining the job threads is
+  not enough: a live job left behind would be recorded as *interrupted* and need
+  recovery on the next launch, which is exactly the surprise a Quit should not
+  create. `stop_background_work` now cancels cooperatively (the existing control
+  API) before joining, and a regression test asserts the row ends `Cancelled`
+  with `unfinished_jobs()` empty.
+- **Single instance is a lock file, not a platform crate.** `instance.lock` beside
+  the manifest, taken with `File::try_lock` (stable since 1.89), is one
+  implementation that covers Windows and Linux and keeps the manifest's writer
+  unique — the property that actually matters. A second launch says the app is
+  already running and exits; it does not try to wake the first one over IPC (see
+  the tradeoff note in the module).
 
 **Actions**
 1. `tray-icon` (+ `muda` for the menu; `winit` event loop integration through
