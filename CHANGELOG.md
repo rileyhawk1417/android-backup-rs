@@ -6,11 +6,30 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
-Wave 9 (automation: scheduling, auto-backup on connection, background operation)
-is in progress and targets 0.2.0; the tasks, their order and what has landed so
-far are tracked in `docs/plan/wave-9-automation.md` and `docs/plan/index.md`.
-New work starts from the wave documents, per the "deferred" list in
-`docs/overview_plan.md` §13 (scheduling, notifications, restore).
+Nothing yet. New work starts from the wave documents, per the "deferred" list in
+`docs/overview_plan.md` §13 (restore, code signing, aarch64 and macOS builds).
+
+## [0.2.0] - 2026-10-12
+
+Wave 9: automation. The engine, the manifest and the UI promise exactly what they
+promised in 0.1.0; this release adds a second way to run them — unattended — and it
+does nothing until a device is opted in. Everything here was planned and tracked in
+`docs/plan/wave-9-automation.md`, and the acceptance run is `docs/acceptance.md` §8.
+
+### Changed
+
+- **Closing the window hides it, when a tray icon is available.** On Windows and on
+  Linux desktops with an AppIndicator library, the close button now hides the window
+  and the program keeps running, so a schedule can fire with nobody watching. Use
+  **Quit** in the tray menu or **Quit now** in **Background…** to stop for good;
+  `background.close_to_tray = false` restores "close means quit". Where no tray icon
+  can be created, close still means quit, and the app says so rather than pretending.
+- **Quitting cancels live jobs cooperatively** instead of leaving them to be recovered
+  on the next launch: the job and driver threads are joined, the manifest is left
+  consistent, and an exit no longer resembles a crash.
+- The tray icon is an optional runtime dependency on Linux
+  (`libayatana-appindicator3`); it is loaded at runtime and its absence is reported,
+  never fatal.
 
 ### Added
 
@@ -50,9 +69,22 @@ New work starts from the wave documents, per the "deferred" list in
   finishing, and anything that needs attention, with the same wording the panel
   uses. Repeat toasts are coalesced per device and kind, and they are paced so a
   flapping phone cannot produce a toast storm.
-- **Quit means stop.** Quitting cancels live jobs cooperatively, joins the job
-  and driver threads, and leaves the manifest consistent — an exit no longer
-  looks like a crash for the next launch to recover.
+
+### Known limitations
+
+- **No restore.** Unchanged from 0.1.0: files go phone → computer, and putting them
+  back is a manual `adb push`. Restore is still on the deferred list.
+- **The tray icon and the toasts are best-effort on Linux.** The AppIndicator
+  library is neither bundled nor required; without it the program runs windowed,
+  close means quit, and the error text says which of the two reasons applies
+  (`docs/setup.md` §3, `docs/troubleshooting.md` §18). GNOME additionally needs an
+  extension before it will show a tray icon at all.
+- **Automation runs while the program runs.** There is no service and no second
+  process: closing to the tray and the login entry are what keep it up. A machine
+  that is asleep at the scheduled time backs up when it wakes.
+- **Schedules are intervals, not calendars.** "Every day at 03:00" is deliberately
+  not in the model (timezone and missed-run semantics a phone backup does not need);
+  "every 6 hours" counts from the last attempt.
 
 ## [0.1.0]
 
