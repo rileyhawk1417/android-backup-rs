@@ -78,6 +78,11 @@ deps="$dist/$name.deps.txt"
     echo
     echo "X11, Wayland, GL and GTK are dlopen'd at runtime by winit/glutin/rfd,"
     echo "not linked, so they must come from the host desktop environment."
+    echo
+    echo "the tray icon additionally needs libayatana-appindicator3 (or the older"
+    echo "libappindicator3), also dlopen'd and also optional: on a desktop without"
+    echo "it the app runs with its window and no tray icon, and closing the window"
+    echo "quits, exactly as it did before Wave 9."
 } > "$deps"
 sed 's/^/  /' "$deps"
 

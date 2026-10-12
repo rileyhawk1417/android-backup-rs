@@ -56,6 +56,17 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -qtf "$prefix/share/icons/hicolor" 2>/dev/null || true
 fi
 
+# The tray icon is the one optional runtime piece: the appindicator library is
+# loaded on demand, and without it the app simply runs with a window and no tray
+# icon (closing the window then quits, as it did before). Said once, and only when
+# it is actually missing.
+if ! ldconfig -p 2>/dev/null | grep -q -e libayatana-appindicator3 -e libappindicator3; then
+    echo
+    echo "Note: no libayatana-appindicator3 was found, so there will be no tray icon."
+    echo "      Install it (Debian/Ubuntu: libayatana-appindicator3-1) for one. The app"
+    echo "      works either way."
+fi
+
 case ":$PATH:" in
     *":$prefix/bin:"*) ;;
     *)
