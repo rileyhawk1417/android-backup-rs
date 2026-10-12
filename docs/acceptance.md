@@ -190,6 +190,10 @@ the layout, fonts and dialogs hold up at the default and minimum window sizes.
   live-network installer test of §3). `cargo fmt --check` and
   `cargo clippy --workspace --all-targets -- -D warnings` are clean.
 - Plan: `docs/plan/wave-9-automation.md` (E09.1–E09.7).
+- Artifacts: `scripts/package-linux.sh` → `dist/android-backup-0.2.0-linux-x86_64.tar.gz`
+  (8.2 MB, checksum written beside it), then `scripts/smoke-linux.sh` → **PASS**.
+  The Windows ZIP and the AppImage were not built here; the release workflow does
+  that on the tag (see §8.2).
 
 The wave promised a second way to run: the program stays up, notices the phone, and
 copies what is new without being asked — without ever getting in the way of a person
@@ -219,6 +223,7 @@ who is backing something up by hand. Item by item:
 | A 0.1.0 installation survives the upgrade untouched | Config without the new keys, database at v1 with rows in it | `config.rs::a_0_1_0_config_file_loads_unchanged_with_automation_off`; `migrations.rs::a_v1_database_upgrades_in_place_and_keeps_its_rows` | **PASS** |
 | The new layer is documented | `setup.md` §10 (the whole story: schedules, pause, tray menu, login entry, notifications), `troubleshooting.md` §17–§21, and the same in the README | Read through against the code; every claim in §10 traced to a test or a constant | **PASS (self-review)** |
 | The panel and the modal render | Headless render passes, including the new automation rows, the status line and the Background dialog | `desktop/tests/ui_headless.rs` (24 cases, was 13) | **PASS** |
+| The packaging path still works with the tray in it | The 0.2.0 tarball was built from this tree and its *binary* started on a private `Xvfb` display with `env -i` and a throwaway `HOME`; the `.deps.txt` names the appindicator library as optional | `scripts/package-linux.sh`, `scripts/smoke-linux.sh` (**PASS**), `dist/*-0.2.0-*.deps.txt` | **PASS (Linux; the ZIP and AppImage are the pipeline's job)** |
 | The UI still holds no engine logic | Dependency and single-`eframe::App` invariants, re-checked with two new modules | `desktop/tests/architecture.rs` | **PASS** |
 
 ### 8.2 What is still not proven
