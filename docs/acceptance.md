@@ -1,9 +1,15 @@
-# MVP acceptance run
+# Acceptance runs
 
 The record of how this project's definition of done (plan §16, executed as
 E08.4) was checked, item by item, with the evidence for each. It is written to be
 audited: every row names the check that produced it, so anyone can re-run the
 same thing and get the same answer.
+
+There are two runs, and they do not replace each other. §1–§7 are the **MVP run**
+(Wave 8, `v0.1.0`): the engine, the manifest and the UI. §8 is the **automation
+run** (Wave 9, `v0.2.0`): scheduling, background operation, the tray icon and
+notifications. Each records the suite as it stood on its own date, which is why
+the counts differ.
 
 It is also honest about the difference between three kinds of "yes":
 
@@ -174,3 +180,83 @@ documentation bug. → §4 row 4, and §5 item 5.
 **The UI on a real screen.** Launch it on a desktop with a display and check that
 the layout, fonts and dialogs hold up at the default and minimum window sizes.
 → §2.4 row 4.
+
+## 8. Wave 9 acceptance (automation)
+
+- Date: 2026-10-12.
+- Machine: x86_64 Linux (CachyOS), the same one as §1, with the same absence of a
+  phone, a Windows desktop and a display.
+- Suite: `cargo test --workspace` → **574 passed, 0 failed, 1 ignored** (the
+  live-network installer test of §3). `cargo fmt --check` and
+  `cargo clippy --workspace --all-targets -- -D warnings` are clean.
+- Plan: `docs/plan/wave-9-automation.md` (E09.1–E09.7).
+
+The wave promised a second way to run: the program stays up, notices the phone, and
+copies what is new without being asked — without ever getting in the way of a person
+who is backing something up by hand. Item by item:
+
+### 8.1 What was promised
+
+| Item | How it was checked | Evidence | Status |
+| --- | --- | --- | --- |
+| A device can be scheduled, and the schedule survives a restart | Pure `due`/`next_due` truth tables, monotonicity over 200 steps, clamping, and the manifest's `(kind, hours)` round trip | `automation::schedule` unit tests (9); `devices::ProfileService::set_auto_schedule` via the profile tests; migration v2 asserts the two columns exist | **PASS** |
+| Automation is opt-in per device, and off means off | `Policy` must answer `Off` for anything unknown, and never touch a device nobody enrolled | `policy.rs::automation_off_is_inert`, `::an_unknown_device_is_untouched`; `automation.rs::without_the_opt_in_new_devices_stay_off` | **PASS** |
+| A phone plugged in is backed up on its own, once per plug-in | Scripted events into the real rulebook with a recording host | `policy.rs::plugging_in_starts_exactly_one_automatic_run`, `::a_second_plug_in_earns_a_second_run`, `::a_repeated_connected_event_is_still_one_run` | **PASS (simulated)** |
+| The job says who asked for it | A manual start writes `manual`, an automatic one writes `auto`, and the column is per job rather than per device | `automation_trigger.rs` (3 cases, incl. `::triggers_are_per_job_not_per_device`) | **PASS** |
+| An interrupted automatic job is resumed, and copies only the remainder | The real `Policy` wired to the real `BackupController`, over the scripted phone: same job row, `trigger = auto`, `bytes_copied` delta is the rest and not the whole, mtimes of finished files unchanged | `automation_resume.rs::a_reconnected_phone_resumes_the_job_it_interrupted_and_copies_only_the_rest` | **PASS (simulated)** |
+| A job a person started is never resumed by automation | Same harness, `trigger = manual` | `automation_resume.rs::a_job_a_person_started_is_left_for_that_person_to_resume`; `policy.rs::a_paused_manual_job_is_never_resumed`, `driver.rs::a_paused_manual_job_is_left_alone_by_the_clock` | **PASS (simulated)** |
+| A flapping cable produces no retry storm | Eleven events inside one cooldown → one attempt; an unusable device is left alone until replugged | `policy.rs::a_flapping_cable_gets_one_attempt_per_cooldown_not_eleven`, `::a_broken_device_stops_being_tried_until_it_is_replugged`, `::an_unauthorized_phone_that_flaps_is_explained_no_more_than_once_per_interval` | **PASS** |
+| Fixing the gate works immediately, not two minutes later | A refusal (`NotReady`) does not arm the failure cooldown; an infrastructure failure does | `policy.rs::an_unauthorized_plug_in_explains_itself_once_and_still_backs_up_afterwards` | **PASS** |
+| An automatic job that keeps dying asks for a person | Two resumes per job, then one note and silence | `policy.rs::a_job_that_keeps_stopping_stops_being_resumed_and_asks_for_a_person`, `::a_different_paused_job_gets_a_fresh_resume_budget`; `driver.rs::the_clock_respects_the_resume_budget` | **PASS** |
+| A phone left connected overnight is backed up by the clock | Interval fires on the boundary and not before; an unplugged device makes every tick a no-op; a new interval takes effect without waiting out the old one | `driver.rs::an_interval_fires_on_the_boundary_and_not_before_it`, `::an_unplugged_device_makes_every_tick_a_no_op`, `::an_unenrolled_device_is_never_ticked`, `::a_new_interval_takes_effect_without_waiting_out_the_old_one` | **PASS** |
+| The clock can be started, paused and stopped, and stops even while asleep | Thread lifecycle and `Condvar` wake-ups; the pre-wait stop check | `driver.rs::the_clock_runs_pauses_and_stops`, `::dropping_the_clock_stops_the_thread_even_when_paused` | **PASS** |
+| Closing the window hides it, and the work continues | Close request against tray availability and the setting; a job started while hidden is adopted by the panel | `app.rs::closing_the_window_hides_it_when_a_tray_can_bring_it_back`, `::closing_the_window_quits_when_there_is_no_tray`, `::closing_the_window_quits_when_close_to_tray_is_switched_off`, `::a_phone_that_arrives_while_the_window_is_hidden_backs_itself_up`, `::a_phone_with_no_schedule_is_left_alone_even_when_it_appears` | **PASS** |
+| The tray icon says what the panel says, and its menu does what it offers | State derivation (`Idle`/`Running`/`Attention`), distinct drawn icons, menu ids mapped to commands, commands mapped to the window's own intents | `tray.rs` (12 cases incl. `::every_state_draws_a_visible_different_icon`, `::tray_commands_become_the_same_intents_the_window_emits`); `app.rs::the_tray_menu_brings_a_hidden_window_back`, `::the_tray_toggle_pauses_automation_and_writes_it_down`, `::the_tray_backs_up_every_connected_device_at_once`, `::the_icon_says_what_the_panel_says` | **PASS (through the seam)** |
+| Quitting stops a running backup cleanly | Quit with a job in flight → `JobStatus::Cancelled`, nothing left for the next launch to "recover" | `app.rs::quitting_stops_a_running_backup_cleanly_instead_of_leaving_it_to_recovery`, `::the_tray_menu_quits_a_hidden_window_for_good`, `::quitting_closes_the_tray_even_when_the_window_was_never_hidden` | **PASS (simulated)** |
+| Notifications fire while nobody is looking, and stay quiet while somebody is | Success suppressed for a focused, unminimised window; trouble never suppressed; per-device and per-kind coalescing; the queue is bounded and never blocks the UI | `notifications.rs` (17 cases); `app.rs::a_finished_backup_is_announced_when_nobody_is_looking`, `::a_user_requested_pause_is_not_news`, `::a_fatal_stop_is_announced_with_the_engine_s_wording` | **PASS (payload level)** |
+| Starting the program at login is a real, reversible entry | Written, read back, reconciled and removed; one command on Windows; a file on Linux; a refusal is reported rather than hidden | `autostart.rs` (15 cases, Windows via a mock runner, Linux against a temp dir) | **PASS (logic)** |
+| Two copies cannot write one manifest | Second `try_lock` is refused, and the message says who holds it and where to look | `single_instance.rs` (4 cases); `main.rs` stops before it opens the database | **PASS** |
+| A 0.1.0 installation survives the upgrade untouched | Config without the new keys, database at v1 with rows in it | `config.rs::a_0_1_0_config_file_loads_unchanged_with_automation_off`; `migrations.rs::a_v1_database_upgrades_in_place_and_keeps_its_rows` | **PASS** |
+| The new layer is documented | `setup.md` §10 (the whole story: schedules, pause, tray menu, login entry, notifications), `troubleshooting.md` §17–§21, and the same in the README | Read through against the code; every claim in §10 traced to a test or a constant | **PASS (self-review)** |
+| The panel and the modal render | Headless render passes, including the new automation rows, the status line and the Background dialog | `desktop/tests/ui_headless.rs` (24 cases, was 13) | **PASS** |
+| The UI still holds no engine logic | Dependency and single-`eframe::App` invariants, re-checked with two new modules | `desktop/tests/architecture.rs` | **PASS** |
+
+### 8.2 What is still not proven
+
+The same shape as §5 — observation, not code:
+
+1. **A real tray icon.** Every row above proves the *seam*: the state, the menu
+   mapping, the intents and the lifecycle are tested, but `tray-icon`'s own
+   behaviour on Windows 11 and on GNOME (with and without the AppIndicator
+   extension) is unobserved. The icons are drawn programmatically, so nobody has
+   yet seen them at 16 px on a hi-dpi screen.
+2. **A real notification.** The payload, the suppression rules and the pacing are
+   tested; whether Windows Action Center shows the toast under Focus Assist, and
+   whether a Linux daemon shows it at all, is not.
+3. **A real login entry.** The Windows path runs `reg.exe` through a mock runner,
+   so the command is well formed but has never touched a registry. The Linux path
+   is a real file, written and removed in a temp directory.
+4. **An overnight run.** The clock is tested with shifted `Instant`s, not by
+   leaving a phone plugged in. In particular, nobody has seen what a machine that
+   *suspended* does on wake (the model compares elapsed time, so the answer should
+   be "immediately due").
+5. **The first reaction of a person whose phone backs itself up.** Automation is
+   the only feature in this program that acts without being asked, and the honest
+   test is a person noticing the notification and being pleased rather than
+   startled.
+
+### 8.3 Closing the pending rows
+
+1. On a Windows machine: run a scheduled backup with the window closed. Confirm
+   the tray icon appears, that closing the window hides rather than quits, that
+   the toast arrives, and that **Start in the tray when I log in** puts a value
+   under `HKCU\…\Run` and removes it when unticked. → the rows above for
+   hiding to the tray, notifications and the login entry, plus §8.2 items 1–3.
+2. On GNOME: repeat with and without the AppIndicator extension. Either outcome is
+   a pass as long as the **Background…** dialog explains it. → §8.2 item 1.
+3. Plug a phone in with **every 6 hours** set and leave it. Confirm the status line
+   counts down, the backup fires without the window being opened, and only the
+   remainder is copied. → §8.2 item 4.
+4. Unplug mid-backup, replug, and confirm the automatic resume with no prompt.
+   Then do it with a job started by hand and confirm it does *not* resume by
+   itself. → the two resume rows above, for real.

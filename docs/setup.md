@@ -13,8 +13,9 @@ Studio.
 - [7. First launch](#7-first-launch)
 - [8. Where everything is stored](#8-where-everything-is-stored)
 - [9. The second backup (and every one after it)](#9-the-second-backup-and-every-one-after-it)
-- [10. Removing it](#10-removing-it)
-- [11. Building from source](#11-building-from-source)
+- [10. Let it back up on its own](#10-let-it-back-up-on-its-own)
+- [11. Removing it](#11-removing-it)
+- [12. Building from source](#12-building-from-source)
 
 ---
 
@@ -112,7 +113,22 @@ That leaves exactly one compatibility question: **glibc**.
 The released Linux binaries are built inside a pinned older container, and each
 release includes a `.deps.txt` recording the floor it got. If the app refuses to
 start with a message about `GLIBC_2.xx not found`, that is what happened; you
-need either a newer distribution or to build from source (§11).
+need either a newer distribution or to build from source (§12).
+
+One optional piece is worth installing by name: the **tray icon** needs
+`libayatana-appindicator3` (on older distributions, `libappindicator3`), which is
+also loaded at runtime and also not linked:
+
+| Distribution | Package |
+|---|---|
+| Debian, Ubuntu, Mint, Pop!_OS | `libayatana-appindicator3-1` |
+| Fedora, RHEL | `libayatana-appindicator-gtk3` |
+| Arch, Manjaro, EndeavourOS | `libayatana-appindicator` |
+
+Without it the app still runs, with its window and no tray icon; `install.sh`
+mentions it when it is missing ([§10](#10-let-it-back-up-on-its-own) explains what
+the tray is for, and [troubleshooting §18](troubleshooting.md#18-there-is-no-tray-icon)
+what it looks like when it is absent).
 
 ## 4. Install — Windows
 
@@ -120,6 +136,11 @@ Unzip `android-backup-<version>-windows-x64-portable.zip` anywhere — Desktop,
 `%LOCALAPPDATA%\Programs`, a USB stick; it does not care — and run
 `android-backup.exe`. There is no installer and nothing is written outside your
 own user profile (§8).
+
+Once it is running, the app puts a small icon in the notification area — Windows
+may keep it behind the `^` chevron until you drag it out. That icon is how the
+program is quit and how the window is brought back after it has been closed
+([§10](#10-let-it-back-up-on-its-own)).
 
 **Windows SmartScreen.** The build is not code-signed, so the first launch shows
 "Windows protected your PC". Choose **More info → Run anyway**. This is a
@@ -227,21 +248,29 @@ an external drive), or **Later** to decide per device.
 | **Use the system adb** | search `PATH` again — useful after installing platform-tools yourself. |
 | **Try again** | re-run the search and version check. |
 
-**Step 3 — pick the phone.** Plug it in and approve the prompt (§6). It appears
+**Step 3 — should new phones back up on their own?** The welcome panel's last
+line is a checkbox: *Back up a phone when I plug it in*. Left unticked — the
+default — nothing ever runs by itself and every backup is one you start. Tick it
+and phones you plug in from now on back up as soon as they are unlocked; phones
+already in the list are not touched, and each device can be set to something else
+later (every 6 hours, or off) in its own panel. See
+[§10](#10-let-it-back-up-on-its-own).
+
+**Step 4 — pick the phone.** Plug it in and approve the prompt (§6). It appears
 in the **Devices** list on the left with its model and Android version, and the
 status line says `ready`.
 
-**Step 4 — name it.** The **Name** field is what your backup folder is called.
+**Step 5 — name it.** The **Name** field is what your backup folder is called.
 Give it something you will recognise in a year — "Kitchen phone" beats
 `SM-G991B`. Two phones with the same name get the last four characters of their
 serial appended (`Kitchen phone_BCDE`), so nothing ever lands on top of
 something else.
 
-**Step 5 — confirm the destination.** **Backup to** shows the folder for this
+**Step 6 — confirm the destination.** **Backup to** shows the folder for this
 device. **Change…** sets a different one for this device only; **Use the shared
 location** puts it back to the global default plus the device's name.
 
-**Step 6 — choose folders.** Tick what you want copied. The defaults are the
+**Step 7 — choose folders.** Tick what you want copied. The defaults are the
 usual suspects — `DCIM`, `Pictures`, `Movies`, `Music`, `Documents`, `Download`,
 `Android/media`, `Recordings`. Type a name (e.g. `Podcasts`) into the box and
 press **Add folder** for anything else; `Remove` deletes a folder you added
@@ -251,7 +280,7 @@ Some folders (`Android/data`, `Android/obb`) are protected by Android itself and
 cannot be read over ADB on a normal phone — the app will report those files as
 failed rather than pretending they were copied.
 
-**Step 7 — Back up now.** The progress panel shows the current phase, a bar, the
+**Step 8 — Back up now.** The progress panel shows the current phase, a bar, the
 file being copied, and running totals. **Pause** and **Resume** work at any
 point; **Cancel** stops the job and leaves the manifest honest about what was
 actually copied — nothing is deleted, and the next run finishes the remainder.
@@ -266,6 +295,8 @@ to the individual files.
 | Manifest (SQLite) | `~/.local/share/android-backup/manifest.db` | `%APPDATA%\android-backup\manifest.db` |
 | Logs | `~/.local/share/android-backup/logs/android-backup.log` | `%APPDATA%\android-backup\logs\android-backup.log` |
 | Managed adb | `~/.local/share/android-backup/platform-tools/` | `%APPDATA%\android-backup\platform-tools\` |
+| Single-instance lock | `~/.local/share/android-backup/instance.lock` | `%APPDATA%\android-backup\instance.lock` |
+| Login entry, if turned on | `~/.config/autostart/AndroidBackup.desktop` | a value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
 
 Inside a backup destination, the layout is:
 
@@ -300,7 +331,116 @@ has been fully written **and** verified, so an interrupted transfer leaves a
 `.part` file in `.incomplete/` and no manifest row; the next run sweeps the stale
 partial and copies the file again from scratch.
 
-## 10. Removing it
+## 10. Let it back up on its own
+
+Everything so far has been you pressing **Back up now**. This section is the other
+mode: the program keeps running, notices the phone when it appears, and copies what
+is new without being asked. It is off until you turn it on, per device, and a phone
+you never tick stays a phone you back up by hand.
+
+### The schedule, per device
+
+In the device panel, under **Automatic backups**:
+
+| Choice | What happens |
+|---|---|
+| **Off** | Nothing runs by itself. The default for every device, including the ones you have been backing up by hand. |
+| **When connected** | A backup starts as soon as the phone is connected and usable — once per plug-in. |
+| **Every** *n* hours (1–72) | A backup starts that long after the last *attempt* — not the last success, so a phone that keeps failing does not retry itself into a loop. A device with no history at all is due immediately: "every 6 hours" turned on now means "starting now". |
+
+"Connected and usable" is the same gate the Start button uses: USB debugging on, the
+prompt on the phone approved, at least one folder ticked, a destination that exists.
+The line under the control says what will happen next, in words — *"Next automatic
+backup in 2 h 05 m"*, *"An automatic backup is due — it starts as soon as Kitchen
+phone is connected."*, *"Starts by itself whenever Kitchen phone is connected."* When
+it says *"Not yet: …"*, the reason is the gate's own words, and fixing it takes effect
+at the next check — the clock wakes about once a minute — rather than at the next
+interval.
+
+A job that ran because you asked for it counts as a run: backing up by hand at 14:00
+also satisfies "every 6 hours", so the schedule does not fire again ten minutes later
+on top of what you just did.
+
+Three rules that a schedule does not override:
+
+- **Your backup always wins.** If a job is already running — or you started one
+  yourself — automation stays out of the way. It does not queue behind you, and it
+  does not come back later with a second job.
+- **Only automation's own work is continued by automation.** A job that ran out of
+  cable, or hit a phone that went to sleep, is resumed when the phone is ready again,
+  continuing the *same* job, so only the remainder is copied. A job *you* started and
+  interrupted keeps its Resume button to itself: you may have had a reason.
+- **Nothing is left flapping.** After a failed attempt the device is left alone for
+  two minutes, so a cable that reconnects every few seconds produces no retries; and
+  if an automatic job stops twice and cannot be resumed, the program says so and waits
+  for a person instead of trying forever.
+
+### The pause switch
+
+**Pause all automatic backups** in the device panel stops every schedule at once —
+keeping the schedules themselves — and is the *same* switch as **Pause automatic
+backups** in the tray menu, so the two can never disagree. While it is on, the status
+bar says `automatic backups paused` and each panel explains that its next run is
+waiting. Manual backups work exactly as before. **Resume automatic backups** in the
+status bar undoes it.
+
+### The tray icon
+
+The program puts an icon near the clock (Windows: notification area, possibly behind
+the `^` chevron; Linux: the tray, and on GNOME it needs an AppIndicator extension —
+see [troubleshooting §18](troubleshooting.md#18-there-is-no-tray-icon)). Closing the
+window with that icon present **hides** it instead of quitting, and anything running
+keeps running — that is what makes "plug it in overnight" work. The menu:
+
+| Item | What it does |
+|---|---|
+| *Open Android Backup* | shows the window again |
+| *Idle — watching for phones* / *Backing up…* / *Needs attention* | a status line, not a button: the same thing the panel says, where you can see it |
+| *Back up all connected now* | starts an ordinary backup for every ready phone (the same gate as **Back up now**, and the same result in the history) and says which phones it could not start |
+| *Pause automatic backups* / *Resume automatic backups* | the pause switch above |
+| *Quit* | stops the program *and* any backup in flight |
+
+**Closing the window is not quitting.** To stop for good, use **Quit** in the tray
+menu or **Quit now** in **Background…** in the status bar. A job that is running when
+you quit is cancelled the way the Cancel button cancels it: whatever was copied stays
+copied and is recorded, the half-file is swept up, and the next run finishes the
+remainder — an exit never looks like a crash to the next launch.
+
+### Starting with the system
+
+**Background… → Start in the tray when I log in** registers a login entry that starts
+the program hidden, so a scheduled backup is not missed while the window is shut. The
+dialog reports what the desktop actually did — `run at login: enabled`, or why not
+(`not available (…)`, `could not be changed (…)`) — rather than what you asked for. If
+the machine refuses, the tick stays where you put it and your wish is remembered for
+the next launch.
+
+Turning it back off removes the entry. So does `./install.sh --uninstall`.
+
+### Notifications
+
+While the window is hidden, the program announces what you would otherwise miss: an
+automatic backup starting, a job finishing, and a job that needs attention. These are
+system toasts (Windows: Action Center; Linux: your desktop's notification daemon).
+They are deliberately quiet — a backup *starting* or *finishing* is not announced
+while the window is visible and focused, since the panel is already showing it, and
+the same news about the same phone within a minute is collapsed into one toast, so a
+phone with a flaky cable cannot fill your screen. Trouble — a pause, a stop, a
+"here is why nothing started" — is announced whether or not the window is in front
+of you. Nothing depends on them;
+the panel, the history and the log are the record. When one does not appear, see
+[troubleshooting §17](troubleshooting.md#17-no-notification-appeared-when-a-backup-started-or-finished).
+
+### What automation never does
+
+- It never writes to the phone. Every transfer is phone → computer, in every mode;
+  there is no restore.
+- It never starts on a device whose schedule is **Off**, and never for a phone that is
+  not in the manifest.
+- It never deletes or overwrites anything: the two rules in §8 hold exactly as they do
+  for a job you started yourself.
+
+## 11. Removing it
 
 The application never installs anything outside your user profile, so removing
 it means deleting files:
@@ -311,13 +451,18 @@ it means deleting files:
 rm -rf ~/.config/android-backup ~/.local/share/android-backup   # settings, logs, manifest, managed adb
 ```
 
-On Windows, delete the folder you unzipped and, if you want the settings, logs
-and downloaded platform-tools gone too, `%APPDATA%\android-backup`.
+`--uninstall` also removes the login entry, if you had turned
+"start in the tray when I log in" on. On Windows, delete the folder you unzipped and,
+if you want the settings, logs and downloaded platform-tools gone too,
+`%APPDATA%\android-backup`; if you had turned on the login entry, remove the
+`Android Backup` value under
+`HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` in
+`regedit` (turning the checkbox off in **Background…** does it for you).
 
 **Your backups are wherever you told the app to put them (§8) and are not
 touched by any of this.** Delete them deliberately, when you mean to.
 
-## 11. Building from source
+## 12. Building from source
 
 For anyone who wants a build for a different architecture, a newer glibc, or
 just to hack on it:
@@ -331,11 +476,12 @@ cargo build --release -p android-backup-desktop
 
 Rust 1.85 or newer (see `rust-toolchain.toml`). On Linux you also need a C
 compiler and `pkg-config` for the bundled SQLite, plus the X11/Wayland/GTK
-development headers for the window and file dialogs. Packaging helpers live in
+development headers for the window, the file dialogs and the tray icon
+(`libgtk-3-dev`, or your distribution's equivalent). Packaging helpers live in
 `scripts/` (`package-linux.sh`, `build-appimage.sh`, `package-windows.ps1`) and
 are what CI runs; [release.md](release.md) explains how a release is cut.
 
-The full test suite — 400-odd tests, no phone required — is:
+The full test suite — 574 tests, no phone required — is:
 
 ```sh
 cargo test --workspace

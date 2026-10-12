@@ -114,7 +114,11 @@ Linux artifacts, and add a signature-verification step to
   `scripts/check-glibc.sh <binary>` prints the floor of any binary. We link against
   the system's `libgtk-3`, `libX11`, `libxkbcommon` and OpenGL rather than bundling
   them — a native file dialog that looks like the user's desktop is worth more
-  than a bigger tarball.
+  than a bigger tarball. The tray icon's AppIndicator library
+  (`libayatana-appindicator3`, or the older `libappindicator3`) is `dlopen`ed and
+  optional, so it does not appear in `.deps.txt`: a desktop without it gets the
+  window and no icon, which `docs/setup.md` §3 names as the package to install and
+  `docs/troubleshooting.md` §18 covers when it is missing.
 - **Windows:** x86_64, Windows 10 or newer. Nothing to install: the app carries its
   own GUI stack and downloads `adb` when it needs it.
 - **Both:** no root or administrator rights, ever. Everything the app owns lives

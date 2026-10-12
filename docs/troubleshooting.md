@@ -21,6 +21,10 @@ says where it is and what to include.
 - [15. Reading the log, and what to send in a bug report](#15-reading-the-log-and-what-to-send-in-a-bug-report)
 - [16. Windows SmartScreen, and Linux artifacts that will not start](#16-windows-smartscreen-and-linux-artifacts-that-will-not-start)
 - [17. No notification appeared when a backup started or finished](#17-no-notification-appeared-when-a-backup-started-or-finished)
+- [18. There is no tray icon](#18-there-is-no-tray-icon)
+- [19. A backup started by itself, or will not start by itself](#19-a-backup-started-by-itself-or-will-not-start-by-itself)
+- [20. A backup stopped half-way and did not continue](#20-a-backup-stopped-half-way-and-did-not-continue)
+- [21. Starting it a second time says it is already running](#21-starting-it-a-second-time-says-it-is-already-running)
 
 ---
 
@@ -350,3 +354,110 @@ decoration over them.
 - **A repeat was coalesced.** The same kind of news about the same phone within a
   minute is collapsed into one toast, so flapping the cable or a job that pauses
   twice quickly does not stack notifications.
+
+## 18. There is no tray icon
+
+Nothing is broken, but one thing changes: **closing the window quits**, so an
+automatic backup only happens while the window is open. The **Background…** dialog
+in the status bar says which of the two reasons it is — they need different fixes.
+
+**"the tray icon is switched off in the configuration file".** `background.tray_icon`
+is `false` in `config.toml` ([setup §8](setup.md#8-where-everything-is-stored)). Set it
+to `true` and restart. (This is also the switch for a desktop where the tray is
+unwanted rather than unavailable.)
+
+**"this desktop gives it nowhere to put one".**
+
+| Situation | Fix |
+|---|---|
+| Linux without the appindicator library | Install it — Debian/Ubuntu: `sudo apt install libayatana-appindicator3-1`; Fedora: `libayatana-appindicator-gtk3`; Arch: `libayatana-appindicator` — then restart the app. The log names the two sonames it looked for. |
+| GNOME | Tray icons come from an extension, not the shell: install **AppIndicator and KStatusNotifierItem Support** from extensions.gnome.org. Without it the app runs windowed, which is *supported*, not a failure. |
+| A bare window manager (sway, i3, a minimal X session) | There may be no notification area anywhere. Nothing to fix; keep the window open while backing up. |
+| Windows | The icon is probably behind the `^` chevron in the notification area — drag it out to keep it visible, or check **Settings → Personalisation → Taskbar → Other system tray icons**. |
+| Over SSH, in a container, or on a machine with no display | There is no tray and no session bus. The window is the program. |
+
+A hidden window whose tray icon is gone can only be found in the task manager (Task
+Manager / `kill`). Killing it loses nothing: whatever a running job had already copied
+is recorded in the manifest, and the next launch finishes the remainder — it looks like
+[§9](#9-the-app-or-the-machine-died-mid-backup), because that is exactly what it is.
+
+## 19. A backup started by itself, or will not start by itself
+
+**It started without being asked.** That is the one feature that only ever does
+something if a device's schedule was turned on — by the wizard's *Back up a phone when
+I plug it in* checkbox ([setup §7](setup.md#7-first-launch)), or by hand in that
+device's **Automatic backups** row. Look at the row: **Off** means the phone is not
+enrolled, however it looks in the list. To stop it, set the row to **Off**, or press
+**Pause all automatic backups** (the same switch the tray writes) to stop every device
+at once without forgetting any of them. Nothing that was already copied is affected by
+either. The log tells the two kinds of run apart — *automatic backup started*, naming
+the device and the job, is automation; *backup started* is a person pressing a button.
+The history table does not show which it was, and does not need to: the result is the
+same either way.
+
+**It will not start by itself.** The panel's status line names the reason whenever
+there is one — *"Not yet: …"* is the same gate the Start button uses. In order:
+
+1. The row is not **Off**, and automation is not paused (the status bar says
+   `automatic backups paused` when it is).
+2. The phone is connected, unlocked, and shows as `ready` rather than `unauthorized`;
+   USB debugging stays on ([setup §6](setup.md#6-enable-usb-debugging-on-the-phone)).
+3. The destination exists *now*. An external drive that is unplugged is a missing
+   destination, and a scheduled backup will not create one.
+4. At least one folder is ticked, and the job has room to write ([§8](#8-not-enough-free-space)).
+5. **When connected** means once per plug-in: unplug and replug, or press Start.
+   **Every *n* hours** counts from the last *attempt* — including a backup you started
+   by hand, which is why a manual backup at 14:00 silences a 6-hour schedule.
+6. A failed attempt puts that device to sleep for two minutes. Flapping the cable to
+   make it retry sooner will not work; leaving it alone will.
+7. An appearance that was refused three times (the phone answering `unauthorized`, say)
+   is left alone until it is unplugged and plugged back in — deliberately, so a phone
+   sitting there unauthorized does not produce an endless stream of attempts.
+
+If the schedule is on, the phone is happy and nothing runs, the status line is the
+thing to read: it is computed from the same manifest row the engine uses. Then the log
+([§15](#15-reading-the-log-and-what-to-send-in-a-bug-report)) says what the driver
+decided, once per decision.
+
+## 20. A backup stopped half-way and did not continue
+
+Automation resumes **its own** work, and only its own:
+
+| Who started the job | What happens when the phone is ready again |
+|---|---|
+| Automation (a *Backing up…* notification, or *automatic backup started* in the log) | resumed on its own — up to twice per job |
+| You, with the Start button | nothing; the job keeps its **Resume** button for you |
+
+Resuming continues the *same* job from the manifest, so files that were already
+verified are not copied again — only the remainder is. A job that stops twice and cannot
+be resumed is reported instead of retried forever, with this wording: *"the connection
+kept dropping, so resuming it automatically was stopped"*. That job then waits for a
+person: press **Resume** (the phone needs to be connected and locked no longer) and it
+picks up where it left off.
+
+If a *manual* job is stuck, that is the design and not a fault: the app does not
+second-guess a decision you made. Press **Resume** whenever you are ready — the next
+run never re-copies what is already verified.
+
+## 21. Starting it a second time says it is already running
+
+```
+Android Backup is already running (process 4242).
+
+It keeps running after its window is closed, so that automatic backups can happen
+while it is out of the way. Open the window from its icon in the notification area
+(the system tray), next to the clock.
+```
+
+Two programs writing one manifest is the one way to lose data, so the second copy stops
+before it opens anything. The first one is running — usually hidden, and usually
+because of **Start in the tray when I log in**, which is the point of that setting. Find
+its icon ([§18](#18-there-is-no-tray-icon) if it is not there), or end the process in the
+task manager and start again.
+
+`instance.lock`, next to the manifest
+([setup §8](setup.md#8-where-everything-is-stored)), is the file that enforces this. It
+holds the owning process id and is locked by the operating system, which releases the
+lock when the process ends — even if the process was killed, so a leftover file is
+harmless and can be ignored. Deleting it while the program runs does not unlock
+anything either: the lock lives on the open file handle, not on the name.

@@ -327,8 +327,26 @@ Decisions taken while building this wave:
       reconciled at startup, `--hidden` for the login entry, single instance via a
       `File::try_lock` on `instance.lock`. Quit cancels live jobs before joining,
       so nothing is left for the next launch to "recover".
-- [ ] E09.6 Settings & status UI
-- [ ] E09.7 Docs, packaging, release (wave gate)
+- [x] E09.6 Settings & status UI — `core::devices::ProfileService::set_auto_schedule`
+      plus the `view::AutoStatus` model, so the status line the panel shows is
+      computed from the same row the engine reads and is unit-tested on its own.
+      The panel edits a device's schedule (Off / when connected / every N hours,
+      1–72, defaulting to 24), the status bar carries the global pause and a
+      **Background…** dialog for close-to-tray, run-at-login and quitting for
+      good, and the wizard asks once whether *new* phones should back up on their
+      own — applied through an `OptInSink` to phones discovered later, never to
+      the ones already chosen for.
+- [x] E09.7 Docs, packaging, release (wave gate) — `setup.md` §10 describes the
+      whole layer end to end (schedules, the pause switch, the tray menu,
+      close-to-tray, the login entry, notifications, what automation never does),
+      `troubleshooting.md` §17–§21 covers the toast that did not appear, the missing
+      tray icon, "it backed up by itself / it will not", a stopped job, and the
+      already-running message; README's status, feature list and test count are
+      current. `install.sh` warns about the optional AppIndicator package and
+      removes the Linux login entry on `--uninstall`; CI installs `libgtk-3-dev` so
+      the tray compiles. Version `0.2.0`, `CHANGELOG.md` filled in, acceptance
+      record in [`docs/acceptance.md`](../acceptance.md) §8 — the wave gate itself
+      is the tag.
 
 **Standing rules for this wave (from wave-9-automation.md):** one attempt per
 trigger and one notification per connection episode, the gate decides exactly

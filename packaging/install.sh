@@ -24,8 +24,14 @@ bin="$prefix/bin/android-backup"
 desktop="$prefix/share/applications/android-backup.desktop"
 icon="$prefix/share/icons/hicolor/256x256/apps/android-backup.png"
 
+# The login entry, if the user turned "Start in the tray when I log in" on: it is
+# written by the application, not by this script, and it points at the binary this
+# script is about to remove. Leaving it behind would mean a login session spending
+# its time failing to start something that is not there.
+autostart="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/AndroidBackup.desktop"
+
 if [ "$uninstall" = 1 ]; then
-    for path in "$bin" "$desktop" "$icon"; do
+    for path in "$bin" "$desktop" "$icon" "$autostart"; do
         if [ -e "$path" ]; then
             rm -f "$path"
             echo "removed $path"

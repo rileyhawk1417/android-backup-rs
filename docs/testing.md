@@ -18,12 +18,13 @@ manual rows below stay **PENDING** until a human with hardware fills them in.
 
 | Suite | Command | What it proves |
 |-------|---------|----------------|
-| Core unit | `cargo test -p android-backup-core --lib` (289) | ADB runner/parser/locator, manifest repositories, path sanitization, watcher, gate, engine internals, managed-installer manifest/zip/swap |
+| Core unit | `cargo test -p android-backup-core --lib` (340) | ADB runner/parser/locator, manifest repositories, path sanitization, watcher, gate, engine internals, managed-installer manifest/zip/swap |
 | Device fixtures | `cargo test -p android-backup-core --test device_listing_fixtures` (8) | `adb devices -l` parsing across CRLF, spacing, daemon chatter and 11 real-world fixtures |
 | Engine E2E | `cargo test -p android-backup-core --test e2e_backup` (25) | The whole backup engine on a scripted phone (Wave 5 hard gate) |
 | Reliability scenarios | `cargo test -p android-backup-core --test scenario_*` (23) | Disconnect, unauthorized, crash mid-write, duplicate names, corrupt manifest, 50k files, history/versioning |
-| UI unit | `cargo test -p android-backup-desktop --lib` (57) | View model folding, gating, intents, startup planning, logging, managed-install flow |
-| UI headless | `cargo test -p android-backup-desktop --test ui_headless` (13) | Real `egui::Context::run` frames, asserting the text actually laid out (incl. install progress + cancel) |
+| Automation | `cargo test -p android-backup-core --test automation_resume --test automation_trigger` (5) | The rulebook and the real controller together: an interrupted automatic job resumes on reconnect, copies only the remainder, and a job a person started is left alone; `start` records `trigger = manual`/`auto` per job |
+| UI unit | `cargo test -p android-backup-desktop --lib` (143) | View model folding, gating, intents, startup planning, logging, managed-install flow |
+| UI headless | `cargo test -p android-backup-desktop --test ui_headless` (24) | Real `egui::Context::run` frames, asserting the text actually laid out (incl. install progress + cancel) |
 | Architecture | `cargo test -p android-backup-desktop --test architecture` (4) | No backup logic in the UI, no `egui` in core, one `eframe::App`, UI folds core types |
 | Live installer (network) | `cargo test -p android-backup-core --test installer_network` (2 + 1 ignored) | The managed install against Google itself: live manifest, live digest, extracted adb really runs. See §3 |
 
@@ -41,7 +42,8 @@ file ever existing), but this checkout has no remote, so they have never execute
 The `apt-get` list for the Linux GUI build is the one line most likely to need an
 edit on that first run.
 
-Last full run: **421 tests, 0 failed, 1 ignored** (Linux, rustc 1.97.1), also green under 8-way CPU load. Also verified:
+Last full run: **574 tests, 0 failed, 1 ignored** (Linux, rustc 1.97.1), also
+green under 8-way CPU load. Also verified:
 `cargo build --release -p android-backup-desktop` succeeds, and the release
 binary, started with no display available, exits 0 after logging
 `could not open the window: … neither WAYLAND_DISPLAY nor WAYLAND_SOCKET nor DISPLAY is set`
@@ -242,6 +244,9 @@ maintainer's first run, a real Windows desktop (incl. the managed `adb` install)
 the published artifact's glibc floor, mounting the AppImage, a non-author dry run
 of the docs, and the UI seen on a real screen.
 
-One design point that is a decision rather than a gap: **resume after
-re-authorization is manual** — the engine pauses and the UI explains, the user
-presses Resume. Automatic re-arm is out of scope (plan §13).
+One design point that is a decision rather than a gap: **whose job may re-arm
+itself.** Since Wave 9 the automation resumes the jobs *it* started when the phone
+is ready again, continuing the same job from the manifest so only the remainder is
+pulled, and gives up after two attempts with a note asking for a person. A job the
+user started keeps its Resume button to itself: re-arming a person's decision is
+still out of scope, and the `trigger` column is what keeps the two apart.

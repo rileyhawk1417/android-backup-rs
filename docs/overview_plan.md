@@ -587,6 +587,13 @@ A background agent may provide:
 
 Do not build a permanent background daemon into the first release.
 
+> **Delivered in 0.2.0 (Wave 9).** All four bullets above are in, as a tray-resident
+> application rather than a daemon: closing the window hides it and the same process
+> keeps watching devices and running schedules, so there is no second copy of the
+> manifest logic and no IPC. `docs/plan/wave-9-automation.md` is the plan of record
+> and `docs/setup.md` §10 is the user-facing description; the daemon-free choice is
+> the point of the wave, not a shortcut. Automation remains opt-in per device.
+
 ---
 
 # 12. MVP Scope
@@ -622,9 +629,11 @@ Do not implement these before the MVP is stable.
 
 ### Future features
 
-* Scheduled backups.
-* Automatic backup on device connection.
-* Background service and notifications.
+* Scheduled backups. — *delivered in 0.2.0 (interval-based; a calendar scheduler is
+  still not planned).*
+* Automatic backup on device connection. — *delivered in 0.2.0.*
+* Background service and notifications. — *delivered in 0.2.0 as a tray application;
+  a service/daemon is still explicitly not built.*
 * Backup encryption.
 * Backup browsing and file restoration.
 * Configurable file filters and exclusions.

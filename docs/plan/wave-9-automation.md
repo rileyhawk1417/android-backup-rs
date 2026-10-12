@@ -56,7 +56,7 @@ Rules that hold across the whole wave:
    the resume rule in E09.2 turns on that distinction — and an audit log that
    cannot tell a machine's work from a person's is not one.
 
-## E09.1 Schedule model (core)
+## E09.1 Schedule model (core) — **implemented**
 
 **Actions**
 1. New module `core::automation::schedule`: a small enum that carries the
@@ -462,7 +462,7 @@ file" instead of blaming the desktop for a setting.
   view model, status line text for each state, wizard checkbox appears and
   defaults off.
 
-## E09.7 Docs, packaging, release (wave gate)
+## E09.7 Docs, packaging, release (wave gate) — **implemented**
 
 **Actions**
 1. Docs: `setup.md` gains "Background & automatic backups" (tray, why closing

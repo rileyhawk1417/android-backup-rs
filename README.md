@@ -9,13 +9,24 @@ files from Android devices over ADB — no Android Studio, no cloud account.
 * Understandable: native desktop UI, device list with live authorization state,
   per-device destinations and folder selection.
 * Local: SQLite manifest lives with your backups; nothing leaves your machine.
+* Unattended, if you want it: per-device schedules (when the phone is plugged in,
+  or every *n* hours), automatic resume of interrupted jobs automation started, a
+  tray icon that keeps it running with the window closed, and system notifications
+  when something happens while nobody is looking. Off by default.
+* One-way, by design: copies from the phone to the computer and never back, and
+  never writes anything to the phone.
 
 ## Status
 
-Wave 8 of 9: the MVP is feature-complete. The backup engine, the SQLite manifest
-and the desktop UI are implemented and green (421 automated checks), and the
-release pipeline builds a portable Windows ZIP and a Linux tarball — plus a
-best-effort AppImage — from a version tag.
+Wave 9 of 9: the plan is complete. The backup engine, the SQLite manifest, the
+desktop UI and the automation layer (scheduling, background operation, tray icon,
+notifications) are implemented and green (574 automated checks), and the release
+pipeline builds a portable Windows ZIP and a Linux tarball — plus a best-effort
+AppImage — from a version tag.
+
+The engine and the UI were the MVP; automation is the layer that lets the program
+run without being watched. It is opt-in per device, and a phone whose schedule is
+**Off** behaves exactly as it did in 0.1.0.
 
 [`docs/acceptance.md`](docs/acceptance.md) is the item-by-item record of the MVP
 definition of done, with the evidence for each row. What is left is *observation*
@@ -49,7 +60,7 @@ Requires a stable Rust toolchain.
 
 ```bash
 cargo run --release -p android-backup-desktop   # open the app
-cargo test --workspace                          # 421 tests (1 ignored, live-network)
+cargo test --workspace                          # 574 tests (1 ignored, live-network)
 cargo fmt --check && cargo clippy --workspace --all-targets
 ```
 
@@ -69,6 +80,11 @@ On first launch, pick a backup folder and point the app at `adb` if it is not on
 it in (nothing is replaced until the new `adb` runs). Then plug in a phone with
 USB debugging on, approve the prompt on the phone, choose the folders to back up,
 and press **Back up now**.
+
+To have it back up on its own, tick the welcome panel's *back up a phone when I
+plug it in* box, or set a schedule per device later; closing the window then hides
+it to the tray rather than quitting. [setup.md §10](docs/setup.md#10-let-it-back-up-on-its-own)
+is the whole story, including what the tray menu does and how to stop it.
 
 ## License
 
