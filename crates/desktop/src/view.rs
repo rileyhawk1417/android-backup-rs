@@ -245,7 +245,9 @@ pub fn auto_status_line(status: &AutoStatus<'_>) -> String {
     };
     if status.paused && status.schedule != Schedule::Off {
         line =
-            format!("Automatic backups are paused from the tray, so this will not run yet. {line}");
+            // One flag, two controls (the panel's checkbox and the tray item), so the
+            // sentence names neither of them.
+            format!("Automatic backups are paused, so this will not run yet. {line}");
     }
     line
 }
