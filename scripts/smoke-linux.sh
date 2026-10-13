@@ -22,6 +22,10 @@
 # exercises the same payload a mount would hand to the kernel, and it lets this
 # script assert the AppDir structure too. Mounting is the AppImage runtime's job
 # and is verified by hand once per release, not here.
+#
+# Where the host can support it, this hands the artifact on to smoke-tray.sh, which
+# tests the tray icon and its menu on a session bus of its own. See that script for
+# why the tray needs one and why the window check above is not enough.
 
 set -euo pipefail
 
@@ -188,7 +192,12 @@ for _ in $(seq 1 40); do
         sed 's/^/  /' "$log" >&2
         exit 1
     fi
-    window="$(DISPLAY="$display" xdotool search --name 'Android Backup' 2>/dev/null | head -1 || true)"
+    # Only a *visible* window of *this* process counts. Both halves of that have
+    # been wrong here before: an unmapped window (the app started hidden to the
+    # tray) is not a window on screen, and a crash dialog is a window on screen
+    # but not this process's — and one of those was mistaken for the app when the
+    # first 0.2.0 build died inside the tray.
+    window="$(DISPLAY="$display" xdotool search --onlyvisible --pid "$pid" --name 'Android Backup' 2>/dev/null | head -1 || true)"
     if [ -n "$window" ]; then
         break
     fi
@@ -196,8 +205,14 @@ for _ in $(seq 1 40); do
 done
 
 if [ -z "$window" ]; then
-    echo "smoke-linux.sh: no 'Android Backup' window appeared within 20s" >&2
+    echo "smoke-linux.sh: no visible 'Android Backup' window appeared within 20s" >&2
     sed 's/^/  /' "$log" >&2
+    exit 1
+fi
+
+owner="$(DISPLAY="$display" xdotool getwindowpid "$window" 2>/dev/null || true)"
+if [ "$owner" != "$pid" ]; then
+    echo "smoke-linux.sh: the window belongs to process $owner, not $pid" >&2
     exit 1
 fi
 
@@ -225,6 +240,47 @@ pid=""
 if [ -s "$log" ]; then
     echo "== stderr/stdout during launch (informational):"
     sed 's/^/  /' "$log"
+fi
+
+# The window above is the half of the artifact that was always tested. The tray is
+# the half that was not, and it is the half 0.2.0 broke: an icon is built on a
+# notification host and a session bus, which this display has none of. So the tray
+# gets a test of its own, on its own bus and its own display, with
+# tray-probe.py standing in for the panel. It covers --hidden, the menu, clicks
+# reaching the app, and a clean quit.
+#
+# Whether it *can* run depends on the host: the icon needs libayatana-appindicator
+# (or libappindicator), loaded at runtime and deliberately not shipped, plus a
+# python3 with Gio and the dbus tools. The release image installs all of it, so a
+# skip there would be a bug in the workflow; on a developer's machine it is a
+# missing optional package, and saying so is better than failing the artifact.
+if python3 - <<'PY'
+import ctypes
+for name in ("libayatana-appindicator3.so.1", "libappindicator3.so.1"):
+    try:
+        ctypes.CDLL(name)
+        raise SystemExit(0)
+    except OSError:
+        pass
+raise SystemExit(1)
+PY
+then
+    set +e
+    "$root/scripts/smoke-tray.sh" "${run[@]}"
+    tray_status=$?
+    set -e
+    case "$tray_status" in
+        0) ;;
+        2)
+            echo "smoke-linux.sh: the tray test needs tools this host lacks; skipped" >&2
+            ;;
+        *)
+            echo "smoke-linux.sh: the tray test failed with status $tray_status" >&2
+            exit 1
+            ;;
+    esac
+else
+    echo "== no libayatana-appindicator on this host: skipping the tray test"
 fi
 
 echo "smoke-linux.sh: PASS"

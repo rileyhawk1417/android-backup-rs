@@ -44,6 +44,13 @@ jobs:
     container:
       image: debian:12-slim
     steps:
+      # The last four packages are for the artifact smoke test rather than the
+      # build: `dbus` and `python3-gi` let scripts/smoke-tray.sh put the icon on a
+      # session bus of its own, and libayatana-appindicator3 is the library that
+      # icon is built on at runtime. It is deliberately *not* in .deps.txt — the app
+      # falls back to a window-only mode without it (see docs/troubleshooting.md) —
+      # but the release image must have it, because a smoke test that quietly skips
+      # the tray is how the first 0.2.0 build shipped a crash.
       - name: Install the build and test toolchain
         run: |
           apt-get update
@@ -51,7 +58,8 @@ jobs:
             build-essential pkg-config binutils git curl ca-certificates xz-utils \
             libx11-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libgtk-3-dev \
             libgl1-mesa-dri squashfs-tools desktop-file-utils \
-            xvfb xdotool
+            xvfb xdotool dbus python3-gi libayatana-appindicator3-1
+
       - uses: actions/checkout@v4
       - name: Install the pinned Rust toolchain
         run: |
