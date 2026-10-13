@@ -28,6 +28,19 @@
 //! scripted double ([`crate::testutil::RecordingTray`]) and never needs a desktop
 //! environment. That is not a luxury: a tray cannot be drawn in CI at all, which is
 //! exactly why nothing but the drawing may live there.
+//!
+//! # What the drawing costs on Linux
+//!
+//! A Linux tray icon is GTK: `tray-icon` builds it from GTK widgets through
+//! `libayatana-appindicator`, and gtk-rs refuses to build one before `gtk::init` — by
+//! *asserting*, not by returning an error. This window is an `eframe`/`winit` window and
+//! never initialises GTK, so building the tray on the window's thread ended the process
+//! at startup with "GTK has not been initialized" in the log — and the smoke test that
+//! should have caught it watched the crash report appear and called it a pass (it now
+//! checks the process and the log instead of the first window title it finds). The tray
+//! therefore lives on a thread of its own, which GTK also needs in order to be *served*:
+//! the panel asks the icon for its menu over the session bus, and those requests are
+//! delivered to a GTK main loop. See [`linux`].
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -314,39 +327,74 @@ pub trait TrayHandle {
 /// Create the tray icon and its menu, if this desktop can have one.
 ///
 /// Returns `Err` with a sentence fit for the log when it cannot: a Linux session
-/// without an appindicator host (a bare GNOME, for instance) has nowhere to put a
-/// tray icon, and the application then behaves as it did before Wave 9 — closing
-/// the window quits — rather than hiding itself where nobody can reach it.
+/// without a display or without an appindicator library (a bare GNOME, for instance)
+/// has nowhere to put a tray icon, and the application then behaves as it did before
+/// Wave 9 — closing the window quits — rather than hiding itself where nobody can
+/// reach it.
 pub fn spawn(wiring: Wiring) -> Result<Box<dyn TrayHandle>, String> {
-    indicator_library()?;
-    NativeTray::create(wiring)
-        .map(|tray| Box::new(tray) as Box<dyn TrayHandle>)
-        .map_err(|err| err.to_string())
+    platform::spawn(wiring)
 }
 
-/// The Linux indicator library, loaded **before** the tray is built.
+/// Which of the two implementations this platform gets.
 ///
-/// [`spawn`] is a documented best-effort path, but on Linux the library that makes
-/// an appindicator is loaded lazily by the tray crate, and its first use *panics*
-/// when it is missing — it does not return an error for the caller to log. So the
-/// answer has to be known first: a desktop with GTK but no appindicator (a minimal
-/// GNOME, a bare window manager) then gets no tray icon and keeps working, instead of
-/// a process that dies the moment it tries to make one.
+/// A platform gets one or the other. On Linux the tray has to be built on a thread of
+/// its own and served from a GTK main loop (see [`linux`]); Windows and macOS want it
+/// built on the window's thread, inside the message loop that is already running
+/// (see [`native`]). Deciding that here keeps [`spawn`] — the seam the application
+/// calls — one line wide on every platform.
 #[cfg(target_os = "linux")]
-fn indicator_library() -> Result<(), String> {
-    for name in LIBS {
-        if can_load(name) {
-            return Ok(());
-        }
+use linux as platform;
+#[cfg(not(target_os = "linux"))]
+use native as platform;
+
+/// Whether this desktop can have a tray icon, as a sentence when it cannot.
+///
+/// Two things have to be true, and neither is fatal to the application: the session
+/// needs a display for an icon to live in, and the appindicator library that
+/// `tray-icon` loads lazily has to be findable — because the crate *panics* when it
+/// is missing instead of returning an error to log. Asking both questions here is
+/// what turns "this desktop cannot do it" into a message rather than a dead process.
+#[cfg(target_os = "linux")]
+fn tray_availability(display: Option<&str>, indicator: Option<&str>) -> Result<(), String> {
+    if display.is_none() {
+        return Err(
+            "there is no display for a tray icon (neither DISPLAY nor WAYLAND_DISPLAY is set); \
+             the application runs without one"
+                .to_string(),
+        );
     }
-    Err(format!(
-        "this desktop has no appindicator library ({}); install libayatana-appindicator3-1 \
-         to get a tray icon — the application runs without one",
-        LIBS.join(" or ")
-    ))
+    match indicator {
+        Some(name) => {
+            tracing::debug!(library = name, "appindicator library found");
+            Ok(())
+        }
+        None => Err(format!(
+            "this desktop has no appindicator library ({}); install libayatana-appindicator3-1 \
+             to get a tray icon — the application runs without one",
+            LIBS.join(" or ")
+        )),
+    }
 }
 
-/// Sonames, in the order the tray crate itself tries them.
+/// The display this session is on, if any: either backend counts, because GTK ends up
+/// on the same one the window is on. A variable that is set while its server is gone
+/// is not caught here — `gtk::init` is what finds that out, which is why its answer is
+/// still reported back to the window.
+#[cfg(target_os = "linux")]
+fn display_name() -> Option<String> {
+    ["WAYLAND_DISPLAY", "DISPLAY"]
+        .into_iter()
+        .find_map(|key| std::env::var(key).ok().filter(|value| !value.is_empty()))
+}
+
+/// The Linux indicator library, found **before** the tray is built, in the order the
+/// tray crate itself tries the sonames.
+#[cfg(target_os = "linux")]
+fn indicator_library() -> Option<&'static str> {
+    LIBS.iter().copied().find(|name| can_load(name))
+}
+
+/// Sonames, in the order `tray-icon`'s Linux backend tries them.
 #[cfg(target_os = "linux")]
 const LIBS: [&str; 2] = ["libayatana-appindicator3.so.1", "libappindicator3.so.1"];
 
@@ -357,12 +405,6 @@ fn can_load(name: &str) -> bool {
     // SAFETY: nothing is called through the handle. It is dropped immediately, which
     // is exactly what the loader expects of a caller who only wanted to know.
     unsafe { libloading::Library::new(name) }.is_ok()
-}
-
-/// Windows and macOS reach the shell directly; there is nothing to check for.
-#[cfg(not(target_os = "linux"))]
-fn indicator_library() -> Result<(), String> {
-    Ok(())
 }
 
 /// Everything the tray builder needs from the application.
@@ -388,146 +430,431 @@ pub struct Wiring {
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-struct NativeTray {
-    icon: TrayIcon,
-    state: std::sync::Mutex<TrayState>,
+/// The menu and the two items that change, built in one place so that the GTK thread
+/// (Linux) and the window's own thread (Windows, macOS) cannot disagree about an id, a
+/// label or an order.
+struct MenuParts {
+    menu: Menu,
     status: MenuItem,
     toggle: CheckMenuItem,
 }
 
-impl NativeTray {
-    fn create(wiring: Wiring) -> Result<Self, String> {
-        let Wiring {
-            commands,
-            automation_paused,
-            ctx,
-        } = wiring;
-        let menu = Menu::new();
-        menu.append(&MenuItem::with_id(
-            MenuId::new(ids::OPEN),
-            "Open Android Backup",
-            true,
-            None,
-        ))
+fn build_menu(automation_paused: bool) -> Result<MenuParts, String> {
+    let menu = Menu::new();
+    menu.append(&MenuItem::with_id(
+        MenuId::new(ids::OPEN),
+        "Open Android Backup",
+        true,
+        None,
+    ))
+    .map_err(|err| format!("could not build the tray menu: {err}"))?;
+
+    // The status line is an item rather than part of the tooltip because
+    // Linux panels usually ignore tooltips.
+    let status = MenuItem::with_id(
+        MenuId::new(ids::STATUS),
+        TrayState::Idle.label(),
+        false,
+        None,
+    );
+    menu.append(&status)
         .map_err(|err| format!("could not build the tray menu: {err}"))?;
-
-        // The status line is an item rather than part of the tooltip because
-        // Linux panels usually ignore tooltips.
-        let status = MenuItem::with_id(
-            MenuId::new(ids::STATUS),
-            TrayState::Idle.label(),
-            false,
-            None,
-        );
-        menu.append(&status)
-            .map_err(|err| format!("could not build the tray menu: {err}"))?;
-        menu.append(&PredefinedMenuItem::separator())
-            .map_err(|err| format!("could not build the tray menu: {err}"))?;
-        menu.append(&MenuItem::with_id(
-            MenuId::new(ids::BACKUP_ALL),
-            "Back up all connected now",
-            true,
-            None,
-        ))
+    menu.append(&PredefinedMenuItem::separator())
         .map_err(|err| format!("could not build the tray menu: {err}"))?;
+    menu.append(&MenuItem::with_id(
+        MenuId::new(ids::BACKUP_ALL),
+        "Back up all connected now",
+        true,
+        None,
+    ))
+    .map_err(|err| format!("could not build the tray menu: {err}"))?;
 
-        let toggle = CheckMenuItem::with_id(
-            MenuId::new(ids::TOGGLE_AUTOMATION),
-            automation_item_label(automation_paused),
-            true,
-            !automation_paused,
-            None,
-        );
-        menu.append(&toggle)
-            .map_err(|err| format!("could not build the tray menu: {err}"))?;
-        menu.append(&PredefinedMenuItem::separator())
-            .map_err(|err| format!("could not build the tray menu: {err}"))?;
-        menu.append(&MenuItem::with_id(
-            MenuId::new(ids::QUIT),
-            "Quit",
-            true,
-            None,
-        ))
+    let toggle = CheckMenuItem::with_id(
+        MenuId::new(ids::TOGGLE_AUTOMATION),
+        automation_item_label(automation_paused),
+        true,
+        !automation_paused,
+        None,
+    );
+    menu.append(&toggle)
         .map_err(|err| format!("could not build the tray menu: {err}"))?;
+    menu.append(&PredefinedMenuItem::separator())
+        .map_err(|err| format!("could not build the tray menu: {err}"))?;
+    menu.append(&MenuItem::with_id(
+        MenuId::new(ids::QUIT),
+        "Quit",
+        true,
+        None,
+    ))
+    .map_err(|err| format!("could not build the tray menu: {err}"))?;
 
-        let icon = Icon::from_rgba(icon(TrayState::Idle).rgba, ICON_SIZE, ICON_SIZE)
-            .map_err(|err| format!("could not draw the tray icon: {err}"))?;
+    Ok(MenuParts {
+        menu,
+        status,
+        toggle,
+    })
+}
 
-        let tray = TrayIconBuilder::new()
+/// Send menu clicks to the window, and make it draw a frame to read them.
+///
+/// The handler runs on whichever thread the shell owns the menu on — the GTK thread on
+/// Linux, the window procedure on Windows — and must not touch the application from
+/// there, so it forwards the command and asks for a repaint. The wake-up is not a
+/// nicety: a click on "Quit" from a *hidden* window has to reach the window before the
+/// window can act on it, and some desktops do not deliver a synthetic redraw to a
+/// window nobody can see. Unknown ids — the status label, or another library's menu —
+/// are ignored.
+fn watch_menu_clicks(commands: Sender<TrayCommand>, ctx: Arc<Mutex<Option<egui::Context>>>) {
+    tray_icon::menu::MenuEvent::set_event_handler(Some(
+        move |event: tray_icon::menu::MenuEvent| {
+            if let Some(command) = command_for(event.id().as_ref()) {
+                let _ = commands.send(command);
+                if let Some(ctx) = ctx
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .as_ref()
+                {
+                    ctx.request_repaint();
+                }
+            }
+        },
+    ));
+}
+
+/// Draw a state onto a live icon: its image, its tooltip and its status line.
+fn apply_state(tray: &TrayIcon, status: &MenuItem, state: TrayState) {
+    if let Ok(image) = Icon::from_rgba(icon(state).rgba, ICON_SIZE, ICON_SIZE) {
+        if let Err(err) = tray.set_icon(Some(image)) {
+            tracing::warn!(%err, "could not update the tray icon");
+        }
+    }
+    if let Err(err) = tray.set_tooltip(Some(state.tooltip())) {
+        tracing::debug!(%err, "could not update the tray tooltip");
+    }
+    status.set_text(state.label());
+}
+
+/// Point the automation toggle at the state it currently describes.
+fn apply_paused(toggle: &CheckMenuItem, paused: bool) {
+    toggle.set_text(automation_item_label(paused));
+    toggle.set_checked(!paused);
+}
+
+// ---------------------------------------------------------------------------
+// Linux: the tray on a thread of its own
+// ---------------------------------------------------------------------------
+
+/// The tray on its own thread, because GTK insists on having one (Linux).
+///
+/// `tray-icon` makes a Linux icon out of GTK widgets through `libayatana-appindicator`,
+/// and gtk-rs will not let those widgets be created or touched before `gtk::init` has
+/// run, nor from a thread other than the one that ran it — and it *asserts* rather
+/// than returning an error, so a window that builds its tray itself dies at startup
+/// with "GTK has not been initialized" instead of opening. The GTK thread is also the
+/// thread GTK has to be *served* from: the icon registers on the session bus and the
+/// panel's requests for its menu are delivered to a GTK main loop, which an egui
+/// window does not run. This thread runs `gtk::main` and keeps running it while the
+/// window is hidden, which is the state the tray exists for.
+///
+/// So the tray is a small service with a handle: nothing GTK crosses the thread
+/// boundary, only requests one way (state, pause, stop) and menu clicks the other (the
+/// commands the menu handler already forwards). The window's [`TrayHandle`] is the
+/// handle; if the thread never gets as far as a usable icon, `spawn` says so and the
+/// application carries on without a tray, as it does on a desktop that has no
+/// appindicator at all.
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::*;
+    use std::sync::mpsc::{self, Receiver, SyncSender};
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+
+    /// How often the GTK thread looks for a request from the window.
+    ///
+    /// A poll rather than a wake-up, because the queue is nearly always empty, this
+    /// thread is idle anyway, and asking a GLib loop every tenth of a second costs less
+    /// than the machinery that would avoid asking. The delay cannot be seen: the icon
+    /// renders a view model that changes at the speed of a backup, not of a frame.
+    const POLL: Duration = Duration::from_millis(100);
+
+    /// How long [`spawn`] waits for the thread to say whether it worked. GTK either
+    /// starts in milliseconds or not at all, and a window with a late tray beats a
+    /// window that never opens — after this, the thread is left to itself.
+    const READY_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// What the window asks of the tray thread. The other direction needs no inventing:
+    /// a menu click is already forwarded by the handler the menu was built with.
+    enum Request {
+        State(TrayState),
+        Paused(bool),
+        /// Take the icon down and let the thread end.
+        Stop,
+    }
+
+    /// What the thread has already been told, so that a per-frame call is not a
+    /// per-frame message.
+    #[derive(Default)]
+    struct Told {
+        state: Option<TrayState>,
+        paused: Option<bool>,
+    }
+
+    /// The handle the window holds. Nothing GTK is in here — which is exactly why a
+    /// thread GTK has never heard of may hold it.
+    pub struct GtkTray {
+        requests: Sender<Request>,
+        told: Mutex<Told>,
+        thread: Mutex<Option<JoinHandle<()>>>,
+    }
+
+    pub fn spawn(wiring: Wiring) -> Result<Box<dyn TrayHandle>, String> {
+        tray_availability(display_name().as_deref(), indicator_library())?;
+
+        let (requests, queue) = mpsc::channel();
+        let (ready, answer) = mpsc::sync_channel(1);
+        let thread = std::thread::Builder::new()
+            .name("android-backup-tray".to_string())
+            .spawn(move || {
+                // The tray is a nicety and the window is the application. gtk-rs's one
+                // way of reporting "the GTK I was initialised with is not the GTK I was
+                // built against" is to assert, so the assert is caught here: the icon
+                // is refused and the run continues without one.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run(queue, wiring, ready.clone())
+                }));
+                if outcome.is_err() {
+                    let _ = ready.try_send(Err("the tray icon could not be built".to_string()));
+                    tracing::warn!(
+                        "the tray thread panicked; the application carries on without a tray"
+                    );
+                }
+            })
+            .map_err(|err| format!("could not start the tray thread: {err}"))?;
+
+        match answer.recv_timeout(READY_TIMEOUT) {
+            Ok(Ok(())) => Ok(Box::new(GtkTray {
+                requests,
+                told: Mutex::new(Told::default()),
+                thread: Mutex::new(Some(thread)),
+            })),
+            Ok(Err(err)) => Err(err),
+            Err(_) => Err("the tray icon did not appear in time".to_string()),
+        }
+    }
+
+    /// The GTK thread: initialise, build, serve, and apply requests until told to stop.
+    ///
+    /// The outcome is reported exactly once, before the loop, so that the window is
+    /// never handed a handle to a tray that is not there.
+    fn run(queue: Receiver<Request>, wiring: Wiring, ready: SyncSender<Result<(), String>>) {
+        // The thread's first act, and the reason this module exists.
+        if let Err(err) = gtk::init() {
+            let _ = ready.send(Err(format!("GTK would not start: {err}")));
+            return;
+        }
+
+        let MenuParts {
+            menu,
+            status,
+            toggle,
+        } = match build_menu(wiring.automation_paused) {
+            Ok(parts) => parts,
+            Err(err) => {
+                let _ = ready.send(Err(err));
+                return;
+            }
+        };
+        let image = match Icon::from_rgba(icon(TrayState::Idle).rgba, ICON_SIZE, ICON_SIZE) {
+            Ok(image) => image,
+            Err(err) => {
+                let _ = ready.send(Err(format!("could not draw the tray icon: {err}")));
+                return;
+            }
+        };
+        let tray = match TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_icon(icon)
+            .with_icon(image)
             .with_tooltip(TrayState::Idle.tooltip())
             .with_menu_on_left_click(true)
             .build()
-            .map_err(|err| format!("this desktop would not take a tray icon: {err}"))?;
-
-        // The menu's handler runs on the shell's thread (a GTK callback on Linux,
-        // the window procedure on Windows). It must not touch the application, so it
-        // forwards the command and the window drains the channel on its own thread
-        // (see `App::drain_tray`). Unknown ids — the status label, or another
-        // library's menu — are ignored.
-        //
-        // The wake-up is not a nicety: a click on "Quit" from a *hidden* window has
-        // to reach the window before the window can act on it, and some desktops do
-        // not deliver a synthetic redraw to a window nobody can see.
-        tray_icon::menu::MenuEvent::set_event_handler(Some(
-            move |event: tray_icon::menu::MenuEvent| {
-                if let Some(command) = command_for(event.id().as_ref()) {
-                    let _ = commands.send(command);
-                    if let Some(ctx) = ctx
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .as_ref()
-                    {
-                        ctx.request_repaint();
-                    }
-                }
-            },
-        ));
-
-        tracing::info!("tray icon installed");
-        Ok(Self {
-            icon: tray,
-            state: std::sync::Mutex::new(TrayState::Idle),
-            status,
-            toggle,
-        })
-    }
-}
-
-impl TrayHandle for NativeTray {
-    fn set_state(&self, state: TrayState) {
         {
-            let mut current = self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if *current == state {
+            Ok(tray) => tray,
+            Err(err) => {
+                let _ = ready.send(Err(format!(
+                    "this desktop would not take a tray icon: {err}"
+                )));
                 return;
             }
-            *current = state;
-        }
-        if let Ok(icon) = Icon::from_rgba(icon(state).rgba, ICON_SIZE, ICON_SIZE) {
-            if let Err(err) = self.icon.set_icon(Some(icon)) {
-                tracing::warn!(%err, "could not update the tray icon");
+        };
+
+        watch_menu_clicks(wiring.commands, Arc::clone(&wiring.ctx));
+
+        // The icon, the menu and the loop that serves them live in this closure,
+        // because this is the only thread allowed to touch them. Requests arrive here,
+        // "stop" among them — which is what lets the loop, and the thread, end.
+        gtk::glib::timeout_add_local(POLL, move || {
+            while let Ok(request) = queue.try_recv() {
+                match request {
+                    Request::State(state) => apply_state(&tray, &status, state),
+                    Request::Paused(paused) => apply_paused(&toggle, paused),
+                    Request::Stop => {
+                        let _ = tray.set_visible(false);
+                        gtk::main_quit();
+                        return gtk::glib::ControlFlow::Break;
+                    }
+                }
+            }
+            gtk::glib::ControlFlow::Continue
+        });
+
+        // Only now is there an icon to speak of, and only now does anything else run on
+        // this thread.
+        let _ = ready.send(Ok(()));
+        tracing::info!("tray icon installed");
+        gtk::main();
+        tracing::debug!("tray thread finished");
+    }
+
+    impl TrayHandle for GtkTray {
+        fn set_state(&self, state: TrayState) {
+            {
+                let mut told = self
+                    .told
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if told.state == Some(state) {
+                    return;
+                }
+                told.state = Some(state);
+            }
+            if self.requests.send(Request::State(state)).is_err() {
+                tracing::debug!("the tray thread is gone; the icon stays as it was");
             }
         }
-        if let Err(err) = self.icon.set_tooltip(Some(state.tooltip())) {
-            tracing::debug!(%err, "could not update the tray tooltip");
+
+        fn set_automation_paused(&self, paused: bool) {
+            {
+                let mut told = self
+                    .told
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if told.paused == Some(paused) {
+                    return;
+                }
+                told.paused = Some(paused);
+            }
+            if self.requests.send(Request::Paused(paused)).is_err() {
+                tracing::debug!("the tray thread is gone; the toggle stays as it was");
+            }
         }
-        self.status.set_text(state.label());
-    }
 
-    fn set_automation_paused(&self, paused: bool) {
-        self.toggle.set_text(automation_item_label(paused));
-        self.toggle.set_checked(!paused);
-    }
-
-    fn close(&self) {
-        let _ = self.icon.set_visible(false);
+        fn close(&self) {
+            // Ignore a send that fails: a thread that has already finished is exactly
+            // what the caller wanted. The join is what matters — it is what makes
+            // quitting wait for the icon to go away.
+            let _ = self.requests.send(Request::Stop);
+            if let Some(thread) = self
+                .thread
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                let _ = thread.join();
+            }
+        }
     }
 }
 
+// ---------------------------------------------------------------------------
+// Windows and macOS: the tray on the window's own thread
+// ---------------------------------------------------------------------------
+
+/// The tray on the window's own thread, which is where these shells want it: the icon
+/// is driven by the window procedure's message loop, and the window is already running
+/// one. There is no second thread here because there is nothing that needs one.
+///
+/// This one is built on Linux too — it asks for nothing Linux cannot compile — so that
+/// code written for a platform the author is *not* sitting at is still type-checked
+/// where it is written. It is never used there, which is all the allow says; on Windows
+/// and macOS it must be used, and being unused is a warning like any other. (The Linux
+/// thread above cannot offer the same, because GTK is not a dependency elsewhere.)
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+mod native {
+    use super::*;
+
+    pub fn spawn(wiring: Wiring) -> Result<Box<dyn TrayHandle>, String> {
+        NativeTray::create(wiring)
+            .map(|tray| Box::new(tray) as Box<dyn TrayHandle>)
+            .map_err(|err| err.to_string())
+    }
+
+    struct NativeTray {
+        icon: TrayIcon,
+        state: std::sync::Mutex<TrayState>,
+        status: MenuItem,
+        toggle: CheckMenuItem,
+    }
+
+    impl NativeTray {
+        fn create(wiring: Wiring) -> Result<Self, String> {
+            let Wiring {
+                commands,
+                automation_paused,
+                ctx,
+            } = wiring;
+            let MenuParts {
+                menu,
+                status,
+                toggle,
+            } = build_menu(automation_paused)?;
+
+            let icon = Icon::from_rgba(icon(TrayState::Idle).rgba, ICON_SIZE, ICON_SIZE)
+                .map_err(|err| format!("could not draw the tray icon: {err}"))?;
+
+            let tray = TrayIconBuilder::new()
+                .with_menu(Box::new(menu))
+                .with_icon(icon)
+                .with_tooltip(TrayState::Idle.tooltip())
+                .with_menu_on_left_click(true)
+                .build()
+                .map_err(|err| format!("this desktop would not take a tray icon: {err}"))?;
+
+            watch_menu_clicks(commands, ctx);
+
+            tracing::info!("tray icon installed");
+            Ok(Self {
+                icon: tray,
+                state: std::sync::Mutex::new(TrayState::Idle),
+                status,
+                toggle,
+            })
+        }
+    }
+
+    impl TrayHandle for NativeTray {
+        fn set_state(&self, state: TrayState) {
+            {
+                let mut current = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if *current == state {
+                    return;
+                }
+                *current = state;
+            }
+            apply_state(&self.icon, &self.status, state);
+        }
+
+        fn set_automation_paused(&self, paused: bool) {
+            apply_paused(&self.toggle, paused);
+        }
+
+        fn close(&self) {
+            let _ = self.icon.set_visible(false);
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -554,10 +881,55 @@ mod tests {
         // tray is skipped); both are outcomes this function is allowed to report.
         let found: Vec<&str> = LIBS.iter().copied().filter(|name| can_load(name)).collect();
         assert_eq!(
-            indicator_library().is_ok(),
+            indicator_library().is_some(),
             !found.is_empty(),
             "the verdict and the probe disagree about {LIBS:?}"
         );
+    }
+
+    /// The table that decides whether GTK is asked for a menu at all. Both answers are
+    /// needed to build an icon, and the message for each has to name the thing that is
+    /// missing — this string is what a user sees in the log when their desktop cannot
+    /// show a tray.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_tray_needs_both_a_display_and_an_indicator_library() {
+        assert!(tray_availability(Some(":0"), Some(LIBS[0])).is_ok());
+        assert!(tray_availability(Some("wayland-0"), Some(LIBS[1])).is_ok());
+
+        let no_display = tray_availability(None, Some(LIBS[0])).unwrap_err();
+        assert!(no_display.contains("no display"), "{no_display}");
+
+        let no_library = tray_availability(Some(":0"), None).unwrap_err();
+        assert!(no_library.contains("appindicator"), "{no_library}");
+        assert!(no_library.contains(LIBS[0]), "{no_library}");
+    }
+
+    /// The shape of the bug this module was written for, at the only place it can be
+    /// reproduced without a desktop: a session with no display must be *refused*, not
+    /// attempted. Asking GTK for a menu there panics (and did, in-process, killing the
+    /// window during startup), so this is the one test that runs [`spawn`] itself, and
+    /// it only runs where the answer is decided before any GTK call is made.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn without_a_display_the_tray_is_refused_instead_of_killing_the_app() {
+        if display_name().is_some() || indicator_library().is_none() {
+            // Either this machine has a display — where building a tray would put an
+            // icon in the user's panel, which a test has no business doing — or it has
+            // no appindicator library, so the reason would be the other one, which the
+            // table above already covers.
+            return;
+        }
+
+        let (commands, _events) = channel();
+        let err = spawn(Wiring {
+            commands,
+            automation_paused: false,
+            ctx: Arc::new(Mutex::new(None)),
+        })
+        .err()
+        .expect("a session with no display cannot have a tray icon");
+        assert!(err.contains("no display"), "unexpected reason: {err}");
     }
 
     /// A view holding exactly one job, which is all the tray state depends on: the

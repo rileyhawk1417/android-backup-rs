@@ -188,9 +188,11 @@ fn run(paths: android_backup_core::config::AppPaths, hidden: bool) -> Result<(),
         picker: None,
         notifier: Some(notifier),
         watch_devices: true,
-        // The real tray icon, built on this thread — the one that will pump the
-        // events it depends on (E09.5). A desktop that has nowhere to put it
-        // reports that itself, and the window then keeps its old close behaviour.
+        // The real tray icon. On Linux it is built (and served) on a thread of its
+        // own, because GTK insists on one; elsewhere it is built here, on the thread
+        // that pumps the events it depends on (E09.5). A desktop that has nowhere to
+        // put it reports that itself, and the window then keeps its old close
+        // behaviour.
         tray: Some(Box::new(android_backup_desktop::tray::spawn)),
         // Automation is on when the application runs unattended (E09.3).
         automation: true,

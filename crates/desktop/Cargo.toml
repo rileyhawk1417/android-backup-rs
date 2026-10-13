@@ -34,6 +34,13 @@ tray-icon.workspace = true
 # tray crate would otherwise find out by panicking (see `tray::indicator_library`).
 [target.'cfg(target_os = "linux")'.dependencies]
 libloading = "0.8"
+# GTK is what a Linux tray icon is made of, and the tray has to initialise it itself:
+# gtk-rs asserts "GTK has not been initialized" (a panic, not an error) if a menu is
+# built before `gtk::init`, and `tray-icon` never calls it. Declared at the version
+# `tray-icon`'s menu crate asks for, because gtk-rs's "is initialised" flag is
+# thread- and crate-instance-local: two GTK versions in the graph would be two
+# answers to the same question, and the tray thread would still panic.
+gtk = "0.18"
 
 [dev-dependencies]
 tempfile.workspace = true
