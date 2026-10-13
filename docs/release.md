@@ -78,8 +78,14 @@ build or smoke test does not fail the release; the AppImage is dropped from it.
 
 The draft is deliberate. Notes and checksums get one human read before they are
 visible, publishing is one click, and a draft can be corrected instead of
-retracted. Formatting and lints are not repeated in this workflow: `ci.yml`
-already runs them on every push, including the tag.
+retracted. Formatting and lints are not repeated in this workflow: a tag
+triggers `release.yml` only — `ci.yml` runs on branch pushes, so the commits
+under a tag should have gone through it on `main` first, and pushing a tag at a
+commit that never did is the anti-pattern this split exists to prevent. (The
+release tests are not the ci tests run twice, either: the linux job checks out
+the tree and runs the suite inside the `debian:12` container the tarball is
+built in, not on ubuntu-latest, so a toolchain or glibc surprise still has a
+chance to surface here rather than at the first install.)
 
 ## 3. Signing: the decision
 

@@ -7,9 +7,11 @@
 # docs/release.md for the whole procedure and for what each job does and does not
 # prove.
 #
-# Formatting and lints are not repeated here: ci.yml already runs them on every
-# push, including the tag, and a release should not be the first place a lint
-# failure shows up.
+# Formatting and lints are not repeated here: this workflow is the only one a
+# tag triggers (ci.yml runs on branch pushes only), and the commits under a tag
+# should have gone through it on main first — so a release is not the first
+# place a lint failure shows up, and a tag on a commit that never passed ci.yml
+# on main is a tag nobody should push.
 
 name: release
 
