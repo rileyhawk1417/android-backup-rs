@@ -134,15 +134,35 @@ impl FsProbe for LocalFsProbe {
 
 /// Free space of the volume that `path` lives on.
 fn free_space_of(path: &Path) -> Option<u64> {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let canonical = canonical_for_comparison(path);
     let disks = sysinfo::Disks::new_with_refreshed_list();
     disks
         .list()
         .iter()
-        .filter(|disk| canonical.starts_with(disk.mount_point()))
+        // Windows answers `canonicalize` with a verbatim path (`\\?\C:\…`), which
+        // is a different prefix component from the `C:\` a mount point is written
+        // with — so `starts_with` refused to match the very volume the path was
+        // on, and every existing directory read as "free space unknown". Both
+        // ends go through the same canonicalization, which puts them in one
+        // namespace; a mount point that refuses (a dead network share) keeps its
+        // plain form, exactly like the queried path does.
+        .map(|disk| {
+            (
+                canonical_for_comparison(disk.mount_point()),
+                disk.available_space(),
+            )
+        })
+        .filter(|(mount, _)| canonical.starts_with(mount))
         // The longest matching mount point is the volume actually in play.
-        .max_by_key(|disk| disk.mount_point().as_os_str().len())
-        .map(|disk| disk.available_space())
+        .max_by_key(|(mount, _)| mount.as_os_str().len())
+        .map(|(_, available)| available)
+}
+
+/// The path as the OS names volumes, for prefix comparison only: canonical when
+/// the path exists (so both ends of the comparison carry the same prefix), the
+/// plain form when it does not.
+fn canonical_for_comparison(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Verify a destination is present, writable and has room for `needed` bytes.
@@ -495,13 +515,19 @@ mod tests {
     fn local_probe_can_read_free_space() {
         let dir = tempfile::tempdir().unwrap();
         let probe = LocalFsProbe::new();
-        let free = probe.free_bytes(dir.path()).unwrap();
-        if let Some(bytes) = free {
-            assert!(bytes > 1024 * 1024, "a test machine has some room: {bytes}");
-        }
+        // Not an `if let`: this test once passed on a probe that answered `None`
+        // for every existing directory (Windows, where canonicalize returns a
+        // `\\?\` path that no mount point matches), and `None` here must fail,
+        // because a backup that cannot see its disk's free space has lost a
+        // guarantee, not gained flexibility.
+        let free = probe
+            .free_bytes(dir.path())
+            .unwrap()
+            .expect("the volume under the temporary directory reports free space");
+        assert!(free > 1024 * 1024, "a test machine has some room: {free}");
         assert_eq!(
             LocalFsProbe::free_space(&dir.path().join("not-there")),
-            free
+            Some(free)
         );
     }
 
