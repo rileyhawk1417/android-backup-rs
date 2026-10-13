@@ -183,17 +183,22 @@ the layout, fonts and dialogs hold up at the default and minimum window sizes.
 
 ## 8. Wave 9 acceptance (automation)
 
-- Date: 2026-10-12.
+- Date: 2026-10-12, with the suite, the packaging and the CI fallout re-checked on
+  2026-10-13 (rustc 1.99.0).
 - Machine: x86_64 Linux (CachyOS), the same one as §1, with the same absence of a
   phone, a Windows desktop and a display.
 - Suite: `cargo test --workspace` → **574 passed, 0 failed, 1 ignored** (the
   live-network installer test of §3). `cargo fmt --check` and
   `cargo clippy --workspace --all-targets -- -D warnings` are clean.
 - Plan: `docs/plan/wave-9-automation.md` (E09.1–E09.7).
+- Toolchain: rustc 1.99.0 (whatever floating `stable` was that day; CI's compiler
+  had moved on from the 1.97.1 this desk still had, and the one lint that
+  difference produced — a 1.99 deprecation in test-only code — is fixed and
+  recorded in `docs/testing.md`).
 - Artifacts: `scripts/package-linux.sh` → `dist/android-backup-0.2.0-linux-x86_64.tar.gz`
-  (8.2 MB, checksum written beside it), then `scripts/smoke-linux.sh` → **PASS**.
-  The Windows ZIP and the AppImage were not built here; the release workflow does
-  that on the tag (see §8.2).
+  (8.2 MB, checksum written beside it, `deps.txt` naming rustc 1.99.0 and the glibc
+  floor), then `scripts/smoke-linux.sh` → **PASS**. The Windows ZIP and the AppImage
+  were not built here; the release workflow does that on the tag (see §8.2).
 
 The wave promised a second way to run: the program stays up, notices the phone, and
 copies what is new without being asked — without ever getting in the way of a person

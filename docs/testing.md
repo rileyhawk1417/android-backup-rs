@@ -36,14 +36,23 @@ time. `.github/workflows/nightly.yml` runs the live installer test with
 `continue-on-error`, so a Google outage is a red nightly run and never a blocked
 pull request.
 
-**PENDING: the first green CI run on GitHub.** The workflows are in the tree
-(added after the Wave 7 audit caught that E00.3 had been marked done without the
-file ever existing), but this checkout has no remote, so they have never executed.
-The `apt-get` list for the Linux GUI build is the one line most likely to need an
-edit on that first run.
+CI has since run against `origin`, and the `apt-get` list for the Linux GUI build
+needed no edit — the Linux job got as far as clippy. What CI did catch is worth
+knowing about: `rust-toolchain.toml` asks for the floating `stable` channel, so CI
+was on rustc **1.99.0** while this checkout was still on 1.97.1, and 1.99
+deprecates `AtomicU32::fetch_update` in favour of `try_update`. Both operating
+systems went red on that single lint under `-D warnings`, in a test-only spawn
+double the release binary never contained, while every local run was green. (The
+two spellings cannot both be used: `try_update` does not exist in 1.89, the
+version `Cargo.toml` declares as the floor, so that budget is spent with a
+compare-and-swap loop instead.) **A green run on a stale `stable` says nothing
+about CI — run `rustup update stable` before trusting one.**
 
-Last full run: **574 tests, 0 failed, 1 ignored** (Linux, rustc 1.97.1), also
-green under 8-way CPU load. Also verified:
+Last full run: **574 tests, 0 failed, 1 ignored** (Linux, rustc 1.99.0), also
+green under 8-way CPU load. The two workflows themselves are in the tree and have
+executed on `origin` rather than only being reviewed by eye (the file was added
+after the Wave 7 audit caught that E00.3 had been marked done without the
+workflow file ever existing). Also verified:
 `cargo build --release -p android-backup-desktop` succeeds, and the release
 binary, started with no display available, exits 0 after logging
 `could not open the window: … neither WAYLAND_DISPLAY nor WAYLAND_SOCKET nor DISPLAY is set`

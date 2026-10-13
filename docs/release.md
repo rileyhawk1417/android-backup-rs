@@ -7,6 +7,9 @@ wrong, retracted. The short version is that a tag does everything:
 scripts/bump-version.sh 0.2.0      # Cargo.toml + Cargo.lock
 $EDITOR CHANGELOG.md              # move Unreleased → 0.2.0, add the compare link
 git commit -am "chore(release): 0.2.0"
+rustup update stable              # the channel floats: check on the compiler CI gets
+cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace            # green here before the tag, not after
 git tag -a v0.2.0 -m v0.2.0
 git push origin main v0.2.0        # ← this publishes (as a draft)
 ```
@@ -14,6 +17,13 @@ git push origin main v0.2.0        # ← this publishes (as a draft)
 `scripts/verify-tag.sh` runs first and refuses to build if the tag, `Cargo.toml`,
 `Cargo.lock`, the changelog and the required docs disagree. Nothing is built on a
 tag that names a version the tree does not contain.
+
+The commands before the tag are not ceremony. CI compiles on whatever `stable` is
+*that day*, because `rust-toolchain.toml` floats, and a suite that is green on a
+toolchain from months ago can still be red there — the 0.2.0 run went red on **both**
+operating systems for exactly that reason, a std method that rustc 1.99 deprecates
+and the compiler on this desk had never heard of (`docs/testing.md`). `rustup update
+stable` first, then the three gates, then the tag.
 
 ## 1. What a release contains
 

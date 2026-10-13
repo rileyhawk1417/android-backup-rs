@@ -474,7 +474,9 @@ cargo build --release -p android-backup-desktop
 ./target/release/android-backup
 ```
 
-Rust 1.85 or newer (see `rust-toolchain.toml`). On Linux you also need a C
+Rust 1.89 or newer (`Cargo.toml`'s `rust-version`; `rust-toolchain.toml` asks for
+the `stable` channel, so that is what CI and the release builds use — rustc 1.99.0
+when this was written). On Linux you also need a C
 compiler and `pkg-config` for the bundled SQLite, plus the X11/Wayland/GTK
 development headers for the window, the file dialogs and the tray icon
 (`libgtk-3-dev`, or your distribution's equivalent). Packaging helpers live in
