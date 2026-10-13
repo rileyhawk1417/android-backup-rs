@@ -72,6 +72,20 @@ does nothing until a device is opted in. Everything here was planned and tracked
 
 ### Fixed
 
+- **Free space is readable on Windows again — the volume holding an existing
+  directory no longer answers "unknown".** On Windows, `canonicalize` returns a
+  verbatim path (`\\?\C:\…`), which is a different prefix component from the
+  `C:\` a mount point is written with, so the volume lookup that matches a path
+  to its disk refused the very volume the path lived on: every existing
+  directory read as `None`, and the before-backup space check silently never ran.
+  Both ends of the comparison go through the same canonicalization now. Found by
+  the Windows round of the CI suite, on a test that had quietly allowed `None`
+  until now — it asserts an actual free-space answer instead.
+- **A large-output fixture test is spelled for the shell that runs it.** The
+  no-deadlock test wrote an sh `for`/`seq` loop verbatim into the Windows `.bat`
+  fixture, where cmd wants `%%i` — "i was unexpected at this time", exit 255, and
+  a test that never produced its output at all. It has a batch spelling now
+  (`for /L %%i in (1,1,40000)`), same 2 MiB, same line count.
 - **The Linux tray icon is created on a thread of its own.** An AppIndicator cannot
   exist before GTK is initialised, and on the window's thread GTK is not — that
   thread belongs to winit — so gtk-rs asserted and the first 0.2.0 build died at

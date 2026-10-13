@@ -48,6 +48,16 @@ version `Cargo.toml` declares as the floor, so that budget is spent with a
 compare-and-swap loop instead.) **A green run on a stale `stable` says nothing
 about CI — run `rustup update stable` before trusting one.**
 
+The Windows round caught a second thing the Linux desk cannot see, in the same
+first push of 0.2.0: an existing directory's free space read as `None`, because
+Windows `canonicalize` returns a `\\?\` path that no mount point matches by
+component — a real bug, not a portability slip, silently disabling the
+before-backup space check on every Windows machine (`backup::destination`). Its
+companion failure was a test fixture: an sh `for`/`seq` loop written verbatim
+into a `.bat`, where cmd wants `%%i` — two failures, two different lessons, one
+push. Local green on Linux proves neither, which is why the suite runs on both
+operating systems from the first commit.
+
 Last full run: **576 tests, 0 failed, 1 ignored** (Linux, rustc 1.99.0), also
 green under 8-way CPU load. The two workflows themselves are in the tree and have
 executed on `origin` rather than only being reviewed by eye (the file was added
