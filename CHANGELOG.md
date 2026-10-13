@@ -9,7 +9,7 @@ All notable changes to this project are recorded here. The format follows
 Nothing yet. New work starts from the wave documents, per the "deferred" list in
 `docs/overview_plan.md` §13 (restore, code signing, aarch64 and macOS builds).
 
-## [0.2.0] - 2026-10-12
+## [0.2.0] - 2026-10-13
 
 Wave 9: automation. The engine, the manifest and the UI promise exactly what they
 promised in 0.1.0; this release adds a second way to run them — unattended — and it
@@ -69,6 +69,18 @@ does nothing until a device is opted in. Everything here was planned and tracked
   finishing, and anything that needs attention, with the same wording the panel
   uses. Repeat toasts are coalesced per device and kind, and they are paced so a
   flapping phone cannot produce a toast storm.
+
+### Fixed
+
+- **A test double no longer calls an atomic method that rustc 1.99 deprecated.** The
+  fake "text file busy" spawner in `crates/core/src/adb/runner.rs` used
+  `AtomicU32::fetch_update`, which 1.99 deprecates in favour of `try_update` — and
+  `try_update` does not exist in 1.89, the version this workspace declares as its
+  minimum, so neither spelling builds everywhere. It is a compare-and-swap loop now.
+  Test-only code: nothing in the shipped binary had that call, and no behaviour
+  changed — CI was red because `clippy -D warnings` compiles the tests too. The
+  release checklist gained the `rustup update stable` that would have caught it
+  locally (`docs/release.md`, `docs/testing.md`).
 
 ### Known limitations
 

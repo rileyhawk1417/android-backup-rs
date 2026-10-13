@@ -506,17 +506,38 @@ mod tests {
                 always: true,
             })
         }
+
+        /// Spend one refusal from the budget, `false` when none is left.
+        ///
+        /// A compare-and-swap loop rather than the tidier
+        /// `fetch_update(…, |n| n.checked_sub(1))`: that call was deprecated in
+        /// 1.99 (renamed `try_update` for consistency with the other `try_*`
+        /// methods) and the new name does not exist in the 1.89 the workspace
+        /// promises (`Cargo.toml`'s `rust-version`), so neither spelling is
+        /// available to a tree that has to build on both.
+        fn take_busy(&self) -> bool {
+            let mut left = self.busy_left.load(Ordering::SeqCst);
+            loop {
+                if left == 0 {
+                    return false;
+                }
+                match self.busy_left.compare_exchange_weak(
+                    left,
+                    left - 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => return true,
+                    Err(actual) => left = actual,
+                }
+            }
+        }
     }
 
     impl ProcessHost for BusyHost {
         fn spawn(&self, cmd: &mut Command) -> std::io::Result<Child> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
-            if self.always
-                || self
-                    .busy_left
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                    .is_ok()
-            {
+            if self.always || self.take_busy() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::ExecutableFileBusy,
                     "Text file busy",
