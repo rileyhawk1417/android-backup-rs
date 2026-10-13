@@ -134,21 +134,14 @@ impl FsProbe for LocalFsProbe {
 
 /// Free space of the volume that `path` lives on.
 fn free_space_of(path: &Path) -> Option<u64> {
-    let canonical = canonical_for_comparison(path);
+    let canonical = plain_for_comparison(&canonical_for_comparison(path));
     let disks = sysinfo::Disks::new_with_refreshed_list();
     disks
         .list()
         .iter()
-        // Windows answers `canonicalize` with a verbatim path (`\\?\C:\…`), which
-        // is a different prefix component from the `C:\` a mount point is written
-        // with — so `starts_with` refused to match the very volume the path was
-        // on, and every existing directory read as "free space unknown". Both
-        // ends go through the same canonicalization, which puts them in one
-        // namespace; a mount point that refuses (a dead network share) keeps its
-        // plain form, exactly like the queried path does.
         .map(|disk| {
             (
-                canonical_for_comparison(disk.mount_point()),
+                plain_for_comparison(disk.mount_point()),
                 disk.available_space(),
             )
         })
@@ -158,11 +151,36 @@ fn free_space_of(path: &Path) -> Option<u64> {
         .map(|(_, available)| available)
 }
 
-/// The path as the OS names volumes, for prefix comparison only: canonical when
-/// the path exists (so both ends of the comparison carry the same prefix), the
-/// plain form when it does not.
+/// The path with symlinks resolved, or as written when it does not exist —
+/// because a nonexistent path is exactly what `free_space` is asked about (the
+/// backup is heading into a directory it has not made yet).
 fn canonical_for_comparison(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Windows prefixes a canonicalized path with `\\?\` (with `\\?\UNC\` for
+/// shares), which is a different prefix component from the `C:\` mount points
+/// are written with — `starts_with` refused the very volume the path lived on,
+/// so every existing directory read as "free space unknown". The normalization
+/// goes *down*, not up: a verbatim path comes back to plain form, because the
+/// other half of the comparison — a path that does not exist yet, and so can-
+/// not be canonicalized — has no way up. On unix this is the identity.
+#[cfg(windows)]
+fn plain_for_comparison(path: &Path) -> PathBuf {
+    let as_text = path.as_os_str().to_string_lossy();
+    if let Some(rest) = as_text.strip_prefix(r"\\\\?\\UNC\\") {
+        PathBuf::from(format!(r"\\\\{rest}"))
+    } else if let Some(rest) = as_text.strip_prefix(r"\\\\?\\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// No verbatim prefixes exist on unix, so the plain form is the path as given.
+#[cfg(not(windows))]
+fn plain_for_comparison(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 /// Verify a destination is present, writable and has room for `needed` bytes.

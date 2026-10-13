@@ -78,9 +78,11 @@ does nothing until a device is opted in. Everything here was planned and tracked
   `C:\` a mount point is written with, so the volume lookup that matches a path
   to its disk refused the very volume the path lived on: every existing
   directory read as `None`, and the before-backup space check silently never ran.
-  Both ends of the comparison go through the same canonicalization now. Found by
-  the Windows round of the CI suite, on a test that had quietly allowed `None`
-  until now — it asserts an actual free-space answer instead.
+  The lookup now normalizes verbatim prefixes back down to the plain form the
+  mount points use — not the other way round, because half of what it is asked
+  about is a directory that does not exist yet and so cannot be canonicalized.
+  Found by the Windows round of the CI suite, on a test that had quietly allowed
+  `None` until now — it asserts an actual free-space answer instead.
 - **A large-output fixture test is spelled for the shell that runs it.** The
   no-deadlock test wrote an sh `for`/`seq` loop verbatim into the Windows `.bat`
   fixture, where cmd wants `%%i` — "i was unexpected at this time", exit 255, and
