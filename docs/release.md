@@ -10,6 +10,8 @@ git commit -am "chore(release): 0.2.0"
 rustup update stable              # the channel floats: check on the compiler CI gets
 cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace            # green here before the tag, not after
+cargo build -p android-backup-desktop
+scripts/smoke-linux.sh target/debug/android-backup   # window and tray, on Xvfb
 git tag -a v0.2.0 -m v0.2.0
 git push origin main v0.2.0        # ← this publishes (as a draft)
 ```
@@ -24,6 +26,13 @@ toolchain from months ago can still be red there — the 0.2.0 run went red on *
 operating systems for exactly that reason, a std method that rustc 1.99 deprecates
 and the compiler on this desk had never heard of (`docs/testing.md`). `rustup update
 stable` first, then the three gates, then the tag.
+
+`scripts/smoke-linux.sh` is in that list for the same reason, from the other
+direction: the suites run the app's *logic*, and the 0.2.0 cycle produced a build
+that passed all of them and then died behind a crash dialog on a desktop, because
+the tray icon was being built where GTK had never been initialised. Running the
+binary and its tray on `Xvfb` before tagging takes about a minute and would have
+caught it (`docs/testing.md` §5).
 
 ## 1. What a release contains
 
@@ -54,7 +63,10 @@ build or smoke test does not fail the release; the AppImage is dropped from it.
    docs and scripts present and executable.
 2. **linux** — in a `debian:12-slim` container: install the toolchain, run
    `cargo test --workspace --locked`, package the tarball, smoke-test the
-   tarball's binary on a private `Xvfb` display, then build and smoke-test the
+   tarball's binary on a private `Xvfb` display and a private session bus — window
+   first, then the tray icon and its menu (`scripts/smoke-linux.sh` and
+   `scripts/smoke-tray.sh`; the container installs `libayatana-appindicator3` so
+   that the tray test cannot quietly skip) — then build and smoke-test the
    AppImage (non-blocking), then record the runtime requirements.
 3. **windows** — on `windows-latest`: the same test suite, a release build, and
    `scripts/smoke-windows.ps1`, which checks the version, the handling of an
@@ -137,10 +149,12 @@ Linux artifacts, and add a signature-verification step to
 ## 5. What the pipeline proves, and what it cannot
 
 Proven on every tag: the tree passes its tests on Windows and on Linux, the tarball
-and ZIP are built from that tree, the tarball's binary starts and puts a window on
-a display in a container with no GPU, the Windows binary reports its version,
-refuses a bogus argument politely, and creates its data directory, and every
-published checksum matches the file next to it.
+and ZIP are built from that tree, the tarball's binary starts, puts a visible window
+of its own on a display in a container with no GPU, installs a tray icon on a private
+session bus and answers its own menu — Open brings the window back, Pause/Resume
+reaches the configuration, Quit ends the process with status 0 — the Windows binary
+reports its version, refuses a bogus argument politely, and creates its data
+directory, and every published checksum matches the file next to it.
 
 Not proven by CI, and listed here so nobody assumes otherwise:
 
@@ -156,6 +170,12 @@ Not proven by CI, and listed here so nobody assumes otherwise:
   mounting it, because mounting needs FUSE and containers do not have it, and a
   desktop with AppImageLauncher installed may intercept the file first. This is
   why the AppImage is secondary.
+- **The tray icon as a panel actually draws it.** The tray test proves the
+  conversation — the item registers with a status notifier host, publishes a menu,
+  and acts on clicks — because that is the part the app owns. Whether a given panel
+  then puts a picture in a corner of the screen is the panel's business, and GNOME
+  needs an extension before it will (`docs/troubleshooting.md` §18). The one thing
+  this cannot catch is an icon that renders as an empty square on a specific panel.
 
 The status of each of these is tracked with evidence in
 [testing.md](testing.md) and recorded per release in [acceptance.md](acceptance.md).

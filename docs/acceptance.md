@@ -187,8 +187,10 @@ the layout, fonts and dialogs hold up at the default and minimum window sizes.
   2026-10-13 (rustc 1.99.0).
 - Machine: x86_64 Linux (CachyOS), the same one as §1, with the same absence of a
   phone, a Windows desktop and a display.
-- Suite: `cargo test --workspace` → **574 passed, 0 failed, 1 ignored** (the
-  live-network installer test of §3). `cargo fmt --check` and
+- Suite: `cargo test --workspace` → **576 passed, 0 failed, 1 ignored** (the
+  live-network installer test of §3), re-measured after the two late additions of
+  the wave went in (the quit-cancels-a-live-job regression test and the tray-state
+  cases). `cargo fmt --check` and
   `cargo clippy --workspace --all-targets -- -D warnings` are clean.
 - Plan: `docs/plan/wave-9-automation.md` (E09.1–E09.7).
 - Toolchain: rustc 1.99.0 (whatever floating `stable` was that day; CI's compiler
@@ -220,7 +222,7 @@ who is backing something up by hand. Item by item:
 | A phone left connected overnight is backed up by the clock | Interval fires on the boundary and not before; an unplugged device makes every tick a no-op; a new interval takes effect without waiting out the old one | `driver.rs::an_interval_fires_on_the_boundary_and_not_before_it`, `::an_unplugged_device_makes_every_tick_a_no_op`, `::an_unenrolled_device_is_never_ticked`, `::a_new_interval_takes_effect_without_waiting_out_the_old_one` | **PASS** |
 | The clock can be started, paused and stopped, and stops even while asleep | Thread lifecycle and `Condvar` wake-ups; the pre-wait stop check | `driver.rs::the_clock_runs_pauses_and_stops`, `::dropping_the_clock_stops_the_thread_even_when_paused` | **PASS** |
 | Closing the window hides it, and the work continues | Close request against tray availability and the setting; a job started while hidden is adopted by the panel | `app.rs::closing_the_window_hides_it_when_a_tray_can_bring_it_back`, `::closing_the_window_quits_when_there_is_no_tray`, `::closing_the_window_quits_when_close_to_tray_is_switched_off`, `::a_phone_that_arrives_while_the_window_is_hidden_backs_itself_up`, `::a_phone_with_no_schedule_is_left_alone_even_when_it_appears` | **PASS** |
-| The tray icon says what the panel says, and its menu does what it offers | State derivation (`Idle`/`Running`/`Attention`), distinct drawn icons, menu ids mapped to commands, commands mapped to the window's own intents | `tray.rs` (12 cases incl. `::every_state_draws_a_visible_different_icon`, `::tray_commands_become_the_same_intents_the_window_emits`); `app.rs::the_tray_menu_brings_a_hidden_window_back`, `::the_tray_toggle_pauses_automation_and_writes_it_down`, `::the_tray_backs_up_every_connected_device_at_once`, `::the_icon_says_what_the_panel_says` | **PASS (through the seam)** |
+| The tray icon says what the panel says, and its menu does what it offers | State derivation (`Idle`/`Running`/`Attention`), distinct drawn icons, menu ids mapped to commands, commands mapped to the window's own intents — and then the assembled binary on a private `Xvfb` display and a private session bus, where `tray-probe.py` plays the panel | `tray.rs` (12 cases incl. `::every_state_draws_a_visible_different_icon`, `::tray_commands_become_the_same_intents_the_window_emits`); `app.rs::the_tray_menu_brings_a_hidden_window_back`, `::the_tray_toggle_pauses_automation_and_writes_it_down`, `::the_tray_backs_up_every_connected_device_at_once`, `::the_icon_says_what_the_panel_says`; **`scripts/smoke-tray.sh` → PASS**: the item registered as `/org/ayatana/NotificationItem/tray_icon_tray_app_…`, `--hidden` left no visible window, `Open Android Backup` showed one, `Pause automatic backups` came back as `Resume automatic backups` *and* as `paused = true` in `config.toml`, `Quit` ended the process with status 0 | **PASS (the seam, and the real icon on a private bus)** |
 | Quitting stops a running backup cleanly | Quit with a job in flight → `JobStatus::Cancelled`, nothing left for the next launch to "recover" | `app.rs::quitting_stops_a_running_backup_cleanly_instead_of_leaving_it_to_recovery`, `::the_tray_menu_quits_a_hidden_window_for_good`, `::quitting_closes_the_tray_even_when_the_window_was_never_hidden` | **PASS (simulated)** |
 | Notifications fire while nobody is looking, and stay quiet while somebody is | Success suppressed for a focused, unminimised window; trouble never suppressed; per-device and per-kind coalescing; the queue is bounded and never blocks the UI | `notifications.rs` (17 cases); `app.rs::a_finished_backup_is_announced_when_nobody_is_looking`, `::a_user_requested_pause_is_not_news`, `::a_fatal_stop_is_announced_with_the_engine_s_wording` | **PASS (payload level)** |
 | Starting the program at login is a real, reversible entry | Written, read back, reconciled and removed; one command on Windows; a file on Linux; a refusal is reported rather than hidden | `autostart.rs` (15 cases, Windows via a mock runner, Linux against a temp dir) | **PASS (logic)** |
@@ -228,18 +230,22 @@ who is backing something up by hand. Item by item:
 | A 0.1.0 installation survives the upgrade untouched | Config without the new keys, database at v1 with rows in it | `config.rs::a_0_1_0_config_file_loads_unchanged_with_automation_off`; `migrations.rs::a_v1_database_upgrades_in_place_and_keeps_its_rows` | **PASS** |
 | The new layer is documented | `setup.md` §10 (the whole story: schedules, pause, tray menu, login entry, notifications), `troubleshooting.md` §17–§21, and the same in the README | Read through against the code; every claim in §10 traced to a test or a constant | **PASS (self-review)** |
 | The panel and the modal render | Headless render passes, including the new automation rows, the status line and the Background dialog | `desktop/tests/ui_headless.rs` (24 cases, was 13) | **PASS** |
-| The packaging path still works with the tray in it | The 0.2.0 tarball was built from this tree and its *binary* started on a private `Xvfb` display with `env -i` and a throwaway `HOME`; the `.deps.txt` names the appindicator library as optional | `scripts/package-linux.sh`, `scripts/smoke-linux.sh` (**PASS**), `dist/*-0.2.0-*.deps.txt` | **PASS (Linux; the ZIP and AppImage are the pipeline's job)** |
+| The packaging path still works with the tray in it | The 0.2.0 tarball was built from this tree and its *binary* started on a private `Xvfb` display with `env -i` and a throwaway `HOME`; the same binary then installed a tray icon on a private session bus and answered its own menu; the `.deps.txt` names the appindicator library as optional | `scripts/package-linux.sh`, `scripts/smoke-linux.sh` (**PASS**), `scripts/smoke-tray.sh` (**PASS**), `dist/*-0.2.0-*.deps.txt` | **PASS (Linux; the ZIP and AppImage are the pipeline's job)** |
 | The UI still holds no engine logic | Dependency and single-`eframe::App` invariants, re-checked with two new modules | `desktop/tests/architecture.rs` | **PASS** |
 
 ### 8.2 What is still not proven
 
 The same shape as §5 — observation, not code:
 
-1. **A real tray icon.** Every row above proves the *seam*: the state, the menu
-   mapping, the intents and the lifecycle are tested, but `tray-icon`'s own
-   behaviour on Windows 11 and on GNOME (with and without the AppIndicator
-   extension) is unobserved. The icons are drawn programmatically, so nobody has
-   yet seen them at 16 px on a hi-dpi screen.
+1. **A real desktop's tray icon.** The conversation itself is no longer on this
+   list: `scripts/smoke-tray.sh` makes the binary publish a status notifier item,
+   reads its menu over `com.canonical.dbusmenu`, clicks it, and watches the app
+   obey. What remains unobserved is what a *specific* desktop does with it — the
+   Windows 11 shell, GNOME with and without the AppIndicator extension — and how
+   the drawn icons look at 16 px on a hi-dpi screen. (The first build of this wave
+   could not create an icon at all: GTK was being initialised on the window's
+   thread, where gtk-rs asserts. A person found that on a real desktop; the smoke
+   test exists so the next one is found here.)
 2. **A real notification.** The payload, the suppression rules and the pacing are
    tested; whether Windows Action Center shows the toast under Focus Assist, and
    whether a Linux daemon shows it at all, is not.

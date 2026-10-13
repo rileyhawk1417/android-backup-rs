@@ -72,6 +72,18 @@ does nothing until a device is opted in. Everything here was planned and tracked
 
 ### Fixed
 
+- **The Linux tray icon is created on a thread of its own.** An AppIndicator cannot
+  exist before GTK is initialised, and on the window's thread GTK is not — that
+  thread belongs to winit — so gtk-rs asserted and the first 0.2.0 build died at
+  startup, behind a crash dialog. The icon, its menu and a `gtk::main()` loop now
+  live on a thread that does nothing else, and the window talks to them by channel
+  (state, pause, stop). Nothing GTK crosses the boundary, and a host that cannot
+  give the thread an icon still gets a window. The crash also exposed how little
+  proved it: the window smoke test recognised the crash dialog by its title and
+  called it a pass. It now insists on a *visible* window belonging to the process
+  under test, and `scripts/smoke-tray.sh` tests the tray itself on a private session
+  bus — `--hidden`, the menu, clicks reaching the app, and a clean quit — with CI
+  running it on every push (`docs/testing.md`, `docs/release.md`).
 - **A test double no longer calls an atomic method that rustc 1.99 deprecated.** The
   fake "text file busy" spawner in `crates/core/src/adb/runner.rs` used
   `AtomicU32::fetch_update`, which 1.99 deprecates in favour of `try_update` — and

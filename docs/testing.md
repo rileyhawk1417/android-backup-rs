@@ -23,7 +23,7 @@ manual rows below stay **PENDING** until a human with hardware fills them in.
 | Engine E2E | `cargo test -p android-backup-core --test e2e_backup` (25) | The whole backup engine on a scripted phone (Wave 5 hard gate) |
 | Reliability scenarios | `cargo test -p android-backup-core --test scenario_*` (23) | Disconnect, unauthorized, crash mid-write, duplicate names, corrupt manifest, 50k files, history/versioning |
 | Automation | `cargo test -p android-backup-core --test automation_resume --test automation_trigger` (5) | The rulebook and the real controller together: an interrupted automatic job resumes on reconnect, copies only the remainder, and a job a person started is left alone; `start` records `trigger = manual`/`auto` per job |
-| UI unit | `cargo test -p android-backup-desktop --lib` (143) | View model folding, gating, intents, startup planning, logging, managed-install flow |
+| UI unit | `cargo test -p android-backup-desktop --lib` (145) | View model folding, gating, intents, startup planning, logging, managed-install flow |
 | UI headless | `cargo test -p android-backup-desktop --test ui_headless` (24) | Real `egui::Context::run` frames, asserting the text actually laid out (incl. install progress + cancel) |
 | Architecture | `cargo test -p android-backup-desktop --test architecture` (4) | No backup logic in the UI, no `egui` in core, one `eframe::App`, UI folds core types |
 | Live installer (network) | `cargo test -p android-backup-core --test installer_network` (2 + 1 ignored) | The managed install against Google itself: live manifest, live digest, extracted adb really runs. See §3 |
@@ -48,7 +48,7 @@ version `Cargo.toml` declares as the floor, so that budget is spent with a
 compare-and-swap loop instead.) **A green run on a stale `stable` says nothing
 about CI — run `rustup update stable` before trusting one.**
 
-Last full run: **574 tests, 0 failed, 1 ignored** (Linux, rustc 1.99.0), also
+Last full run: **576 tests, 0 failed, 1 ignored** (Linux, rustc 1.99.0), also
 green under 8-way CPU load. The two workflows themselves are in the tree and have
 executed on `origin` rather than only being reviewed by eye (the file was added
 after the Wave 7 audit caught that E00.3 had been marked done without the
@@ -242,11 +242,24 @@ What the artifact-level checks add to the suites above:
 
 | Check | Command | What it proves |
 |-------|---------|----------------|
-| Linux artifact | `scripts/package-linux.sh` then `scripts/smoke-linux.sh dist/*/android-backup` | The packaged tarball installs without root and its binary opens a window on a bare desktop (`Xvfb`, throwaway `HOME`, `env -i`) |
+| Linux artifact | `scripts/package-linux.sh` then `scripts/smoke-linux.sh dist/*/android-backup` | The packaged tarball installs without root and its binary opens a window on a bare desktop (`Xvfb`, throwaway `HOME`, `env -i`). The window must be *visible* and must belong to the process under test, so a crash dialog cannot stand in for it |
+| Linux tray | `scripts/smoke-tray.sh <binary-or-AppImage>`, also reached from `smoke-linux.sh` when the host can support it | The icon really exists and really works, on a session bus of its own where `tray-probe.py` plays the panel: the app takes `--hidden` (no window on screen), the menu the app publishes is readable over `com.canonical.dbusmenu`, and its items act on the app — Open shows the window, Pause comes back as Resume *and* lands in `config.toml`, Quit ends the process with status 0 |
 | Linux AppImage | `scripts/build-appimage.sh` then `scripts/smoke-linux.sh dist/*.AppImage` | The extracted payload of the wrapper runs the same way. Secondary artifact: mounting it needs FUSE, which the smoke test avoids on purpose |
 | Runtime requirements | `scripts/check-glibc.sh <binary>`; `dist/*.deps.txt` | The glibc floor and the `ldd` list of the exact binary that was packaged |
 | Windows artifact | `scripts/package-windows.ps1`, `scripts/smoke-windows.ps1` | Portable ZIP; the `.exe` reports its version, refuses a bogus argument, and creates its data directory in an isolated `%APPDATA%`. **Not yet run on Windows** — the release workflow does that |
-| Tag sanity | `scripts/verify-tag.sh v0.1.0` | A tag that disagrees with `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md` or the required docs cannot be built |
+| Tag sanity | `scripts/verify-tag.sh v0.2.0` | A tag that disagrees with `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md` or the required docs cannot be built |
+
+Why the tray has its own script, and why CI runs it: a tray icon is not a drawing
+but a conversation, and until the 0.2.0 cycle no test had that conversation. That
+cycle is the cost of it — a build that passed every suite here and every release
+check, then died behind a crash dialog on a desktop, because the icon was being made
+on a thread where GTK had never been initialised. The suites cannot catch that: a
+GTK main loop, a session bus and a notification host are not things a unit test may
+own. So `scripts/smoke-tray.sh` runs the assembled artifact instead, on a private
+`Xvfb` display and a private bus, and the `smoke` job in `ci.yml` does it on every
+push rather than only at release time. It skips (loudly, with exit code 2) where the
+appindicator library or the bus tools are absent, which is a statement about the
+host, not about the artifact.
 
 Still PENDING, and tracked as rows in `acceptance.md`: a real phone beyond the
 maintainer's first run, a real Windows desktop (incl. the managed `adb` install),

@@ -349,7 +349,8 @@ Autostart lives in `desktop::autostart` (Windows Run key via `reg.exe`, Linux
 `.desktop` file) and is reconciled from the config at startup — both through
 `core::fsx::write_atomic`, so a crash cannot leave a truncated entry.
 
-**Two decisions worth recording.**
+**Three decisions worth recording.**
+
 - **Quit cancels live jobs.** Stopping the driver and joining the job threads is
   not enough: a live job left behind would be recorded as *interrupted* and need
   recovery on the next launch, which is exactly the surprise a Quit should not
@@ -362,6 +363,20 @@ Autostart lives in `desktop::autostart` (Windows Run key via `reg.exe`, Linux
   unique — the property that actually matters. A second launch says the app is
   already running and exits; it does not try to wake the first one over IPC (see
   the tradeoff note in the module).
+- **On Linux the icon is built on a thread of its own, and the tray is tested as
+  an artifact.** This is the wave's one genuine surprise. `tray-icon` on Linux goes
+  through GTK, GTK must be initialised before an indicator can exist, and the
+  window's thread is winit's — so gtk-rs asserted and the *first* 0.2.0 build died at
+  startup, behind a crash dialog, on a machine where every test was green. Linux
+  therefore runs the icon, the menu and a `gtk::main()` loop on a dedicated thread
+  that owns the icon state; only requests (state, pause, stop) and menu clicks
+  cross, by channel, and a host that cannot give the thread an icon still gets a
+  window. The second half of the lesson is about proof rather than code: the window
+  smoke test had matched the crash dialog by title and called it a pass. It now
+  insists on a visible window belonging to the process under test, and
+  `scripts/smoke-tray.sh` tests the tray itself — a private session bus,
+  `tray-probe.py` as a stand-in panel, `--hidden`, the real menu, real clicks, a
+  clean quit — on every push in CI, not only at release time.
 
 **Actions**
 1. `tray-icon` (+ `muda` for the menu; `winit` event loop integration through

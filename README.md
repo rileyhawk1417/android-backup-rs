@@ -20,7 +20,7 @@ files from Android devices over ADB — no Android Studio, no cloud account.
 
 Wave 9 of 9: the plan is complete. The backup engine, the SQLite manifest, the
 desktop UI and the automation layer (scheduling, background operation, tray icon,
-notifications) are implemented and green (574 automated checks), and the release
+notifications) are implemented and green (576 automated checks), and the release
 pipeline builds a portable Windows ZIP and a Linux tarball — plus a best-effort
 AppImage — from a version tag.
 
@@ -60,7 +60,7 @@ Requires a stable Rust toolchain.
 
 ```bash
 cargo run --release -p android-backup-desktop   # open the app
-cargo test --workspace                          # 574 tests (1 ignored, live-network)
+cargo test --workspace                          # 576 tests (1 ignored, live-network)
 cargo fmt --check && cargo clippy --workspace --all-targets
 ```
 

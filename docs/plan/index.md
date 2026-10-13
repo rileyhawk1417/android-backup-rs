@@ -326,7 +326,13 @@ Decisions taken while building this wave:
       best-effort (no icon still means a working window), `desktop::autostart`
       reconciled at startup, `--hidden` for the login entry, single instance via a
       `File::try_lock` on `instance.lock`. Quit cancels live jobs before joining,
-      so nothing is left for the next launch to "recover".
+      so nothing is left for the next launch to "recover". On Linux the icon is
+      *built* on a GTK thread of its own — the window's thread belongs to winit,
+      and gtk-rs asserts instead of failing gracefully, which is how the first
+      0.2.0 build crashed at startup. That crash is also why the tray is now
+      tested as an artifact: `scripts/smoke-tray.sh` runs the assembled binary on
+      a private bus with `tray-probe.py` as a stand-in panel, and the window smoke
+      test no longer accepts a crash dialog in its place.
 - [x] E09.6 Settings & status UI — `core::devices::ProfileService::set_auto_schedule`
       plus the `view::AutoStatus` model, so the status line the panel shows is
       computed from the same row the engine reads and is unit-tested on its own.
@@ -344,7 +350,9 @@ Decisions taken while building this wave:
       already-running message; README's status, feature list and test count are
       current. `install.sh` warns about the optional AppIndicator package and
       removes the Linux login entry on `--uninstall`; CI installs `libgtk-3-dev` so
-      the tray compiles. Version `0.2.0`, `CHANGELOG.md` filled in, acceptance
+      the tray compiles, and runs `scripts/smoke-linux.sh` (window *and* tray) in a
+      job of its own on every push. Version `0.2.0`, `CHANGELOG.md` filled in,
+      acceptance
       record in [`docs/acceptance.md`](../acceptance.md) §8 — the wave gate itself
       is the tag.
 

@@ -483,7 +483,7 @@ development headers for the window, the file dialogs and the tray icon
 `scripts/` (`package-linux.sh`, `build-appimage.sh`, `package-windows.ps1`) and
 are what CI runs; [release.md](release.md) explains how a release is cut.
 
-The full test suite — 574 tests, no phone required — is:
+The full test suite — 576 tests, no phone required — is:
 
 ```sh
 cargo test --workspace
