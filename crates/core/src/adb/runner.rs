@@ -452,12 +452,19 @@ mod tests {
     #[test]
     fn large_output_does_not_deadlock() {
         let dir = tempfile::tempdir().unwrap();
-        // ~2 MiB of stdout: far beyond a pipe buffer.
-        let script = write_script(
-            dir.path(),
-            "big",
-            &["for i in $(seq 1 40000); do echo \"line $i padding padding padding padding\"; done"],
-        );
+        // ~2 MiB of stdout: far beyond a pipe buffer. The same 40 000-line loop
+        // in each fixture language: sh on unix, batch on Windows — the fixture
+        // writer turns whichever it serves into the script, and the loop variable
+        // is %%i in batch because the runner executes .bat fixtures through
+        // `cmd /C`, i.e. in batch-file context.
+        #[cfg(unix)]
+        let lines: &[&str] = &[
+            r#"for i in $(seq 1 40000); do echo "line $i padding padding padding padding"; done"#,
+        ];
+        #[cfg(windows)]
+        let lines: &[&str] =
+            &["for /L %%i in (1,1,40000) do @echo line %%i padding padding padding padding"];
+        let script = write_script(dir.path(), "big", lines);
         let runner = ProcessAdbRunner::new(script);
         let out = runner.run(&["find"], Duration::from_secs(60)).unwrap();
         assert!(
