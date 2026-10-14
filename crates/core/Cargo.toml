@@ -21,7 +21,7 @@ hex.workspace = true
 dirs.workspace = true
 zip.workspace = true
 reqwest.workspace = true
-sysinfo.workspace = true
+fs4.workspace = true
 quick-xml = "0.42"
 sha1 = "0.10"
 

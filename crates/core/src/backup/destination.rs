@@ -132,55 +132,29 @@ impl FsProbe for LocalFsProbe {
     }
 }
 
-/// Free space of the volume that `path` lives on.
+/// Free space of the volume that `path` lives on — `None` when it cannot be
+/// read.
+///
+/// The OS is asked, not a list of mount points matched against the path:
+/// Windows answers `canonicalize` with a verbatim path (`\\?\C:\…`), writes
+/// temp paths in 8.3 names (`RUNNER~1`), and spells drive letters in either
+/// case — and each of those is enough for a component-wise prefix match to
+/// miss the very volume the path is on. `GetDiskFreeSpaceExW` and `statvfs`
+/// have never cared how a path is spelled, because path resolution is their
+/// job, so this asks `fs4` for the answer and climbs to the nearest existing
+/// ancestor when it cannot have one yet — the volume is the same one the
+/// backup is heading into.
 fn free_space_of(path: &Path) -> Option<u64> {
-    let canonical = plain_for_comparison(&canonical_for_comparison(path));
-    let disks = sysinfo::Disks::new_with_refreshed_list();
-    disks
-        .list()
-        .iter()
-        .map(|disk| {
-            (
-                plain_for_comparison(disk.mount_point()),
-                disk.available_space(),
-            )
-        })
-        .filter(|(mount, _)| canonical.starts_with(mount))
-        // The longest matching mount point is the volume actually in play.
-        .max_by_key(|(mount, _)| mount.as_os_str().len())
-        .map(|(_, available)| available)
-}
-
-/// The path with symlinks resolved, or as written when it does not exist —
-/// because a nonexistent path is exactly what `free_space` is asked about (the
-/// backup is heading into a directory it has not made yet).
-fn canonical_for_comparison(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// Windows prefixes a canonicalized path with `\\?\` (with `\\?\UNC\` for
-/// shares), which is a different prefix component from the `C:\` mount points
-/// are written with — `starts_with` refused the very volume the path lived on,
-/// so every existing directory read as "free space unknown". The normalization
-/// goes *down*, not up: a verbatim path comes back to plain form, because the
-/// other half of the comparison — a path that does not exist yet, and so can-
-/// not be canonicalized — has no way up. On unix this is the identity.
-#[cfg(windows)]
-fn plain_for_comparison(path: &Path) -> PathBuf {
-    let as_text = path.as_os_str().to_string_lossy();
-    if let Some(rest) = as_text.strip_prefix(r"\\\\?\\UNC\\") {
-        PathBuf::from(format!(r"\\\\{rest}"))
-    } else if let Some(rest) = as_text.strip_prefix(r"\\\\?\\") {
-        PathBuf::from(rest)
-    } else {
-        path.to_path_buf()
+    let mut probe = path;
+    loop {
+        if let Ok(bytes) = fs4::free_space(probe) {
+            return Some(bytes);
+        }
+        match probe.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => probe = parent,
+            _ => return None,
+        }
     }
-}
-
-/// No verbatim prefixes exist on unix, so the plain form is the path as given.
-#[cfg(not(windows))]
-fn plain_for_comparison(path: &Path) -> PathBuf {
-    path.to_path_buf()
 }
 
 /// Verify a destination is present, writable and has room for `needed` bytes.
@@ -541,10 +515,25 @@ mod tests {
         let free = probe
             .free_bytes(dir.path())
             .unwrap()
-            .expect("the volume under the temporary directory reports free space");
+            // With the path in the message, so a future blindness is
+            // diagnosable from the CI log alone.
+            .unwrap_or_else(|| {
+                panic!(
+                    "the volume under {} reports free space",
+                    dir.path().display()
+                )
+            });
         assert!(free > 1024 * 1024, "a test machine has some room: {free}");
+        // A not-yet-existing destination answers for the volume it will live
+        // on — the OS cannot answer for a path that is not there, so the climb
+        // to the nearest existing ancestor is part of what this proves,
         assert_eq!(
             LocalFsProbe::free_space(&dir.path().join("not-there")),
+            Some(free)
+        );
+        // across more than one missing ancestor on the way.
+        assert_eq!(
+            LocalFsProbe::free_space(&dir.path().join("a/b/not-there")),
             Some(free)
         );
     }

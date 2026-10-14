@@ -58,6 +58,16 @@ into a `.bat`, where cmd wants `%%i` — two failures, two different lessons, on
 push. Local green on Linux proves neither, which is why the suite runs on both
 operating systems from the first commit.
 
+And it did not stop there — the free-space probe took **three** Windows rounds
+to get right, each red run caused by a different way of spelling the same path
+(verbatim `\\?\` prefixes, 8.3 short names, mount points in another namespace).
+Each attempted fix was reasoned out on Linux and wrong; the third attempt threw
+the approach away instead of patching it: matching a path against a list of
+mount points was replaced with asking the OS (`GetDiskFreeSpaceExW`, `statvfs`),
+for which path resolution is the job. The test now names the failing path in
+its panic, so the next blindness is diagnosable from the CI log without a
+local Windows machine.
+
 Last full run: **576 tests, 0 failed, 1 ignored** (Linux, rustc 1.99.0), also
 green under 8-way CPU load. The two workflows themselves are in the tree and have
 executed on `origin` rather than only being reviewed by eye (the file was added

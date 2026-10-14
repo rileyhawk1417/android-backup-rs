@@ -73,16 +73,20 @@ does nothing until a device is opted in. Everything here was planned and tracked
 ### Fixed
 
 - **Free space is readable on Windows again — the volume holding an existing
-  directory no longer answers "unknown".** On Windows, `canonicalize` returns a
-  verbatim path (`\\?\C:\…`), which is a different prefix component from the
-  `C:\` a mount point is written with, so the volume lookup that matches a path
-  to its disk refused the very volume the path lived on: every existing
-  directory read as `None`, and the before-backup space check silently never ran.
-  The lookup now normalizes verbatim prefixes back down to the plain form the
-  mount points use — not the other way round, because half of what it is asked
-  about is a directory that does not exist yet and so cannot be canonicalized.
-  Found by the Windows round of the CI suite, on a test that had quietly allowed
-  `None` until now — it asserts an actual free-space answer instead.
+  directory no longer answers "unknown".** The lookup used to match the path
+  against a list of mount points, and on Windows that is a spelling contest it
+  can only lose: `canonicalize` returns a verbatim path (`\\?\C:\…`), temp
+  paths come in 8.3 names (`RUNNER~1`), drive letters appear in either case —
+  and any one of them makes the component-wise match miss the very volume the
+  path lives on, so every existing directory read as `None` and the
+  before-backup space check silently never ran. (Three CI rounds proved the
+  point, each miss caused by a different spelling.) The lookup no longer
+  matches paths against a disk list at all: it asks the OS — `GetDiskFreeSpaceExW`
+  on Windows, `statvfs` on unix — which never cared how a path is written,
+  and climbs to the nearest existing ancestor for a destination that does not
+  exist yet. `sysinfo` leaves the tree with it; `fs4` takes its place. Found by
+  the Windows round of the CI suite, on a test that had quietly allowed `None`
+  until now — it asserts an actual free-space answer instead.
 - **A large-output fixture test is spelled for the shell that runs it.** The
   no-deadlock test wrote an sh `for`/`seq` loop verbatim into the Windows `.bat`
   fixture, where cmd wants `%%i` — "i was unexpected at this time", exit 255, and
