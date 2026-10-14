@@ -526,16 +526,30 @@ mod tests {
         assert!(free > 1024 * 1024, "a test machine has some room: {free}");
         // A not-yet-existing destination answers for the volume it will live
         // on — the OS cannot answer for a path that is not there, so the climb
-        // to the nearest existing ancestor is part of what this proves,
-        assert_eq!(
-            LocalFsProbe::free_space(&dir.path().join("not-there")),
-            Some(free)
-        );
+        // to the nearest existing ancestor is part of what this proves —
         // across more than one missing ancestor on the way.
-        assert_eq!(
-            LocalFsProbe::free_space(&dir.path().join("a/b/not-there")),
-            Some(free)
-        );
+        //
+        // The climb's proof is *same volume*, not *same reading*: each call is
+        // a live measurement of a live disk, and this test runs on the CI
+        // runner's own system drive, where the answer moved one cluster —
+        // 512 KiB — between the first call and the climb (caught as a red run
+        // after the flake that started all of this was already fixed). The band
+        // is wide (10%, and at least a megabyte) so a busy drive can breathe,
+        // and it is still far past anything a *different* volume could sit at:
+        // what this test must not forgive is `None`, or the climb landing
+        // somewhere else.
+        let expect_same_volume = |first: u64, path: &Path| {
+            let climbed = LocalFsProbe::free_space(path)
+                .unwrap_or_else(|| panic!("the volume under {} answers", path.display()));
+            let breathing = std::cmp::max(first, climbed) / 10 + 1024 * 1024;
+            assert!(
+                first.abs_diff(climbed) <= breathing,
+                "the climb reached another volume: first {first} then {climbed} via {}",
+                path.display()
+            );
+        };
+        expect_same_volume(free, &dir.path().join("not-there"));
+        expect_same_volume(free, &dir.path().join("a/b/not-there"));
     }
 
     #[test]

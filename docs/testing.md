@@ -96,7 +96,11 @@ the approach away instead of patching it: matching a path against a list of
 mount points was replaced with asking the OS (`GetDiskFreeSpaceExW`, `statvfs`),
 for which path resolution is the job. The test now names the failing path in
 its panic, so the next blindness is diagnosable from the CI log without a
-local Windows machine.
+local Windows machine. It earned a fourth round anyway, from *itself* this
+time: after the code was fixed, the climb assertion still demanded bitwise
+equality of two live readings a moment apart, and the runner's system drive
+moved 512 KiB between the two calls. The assertion is a band now — same
+volume is the guarantee, same instant never was.
 
 Last full run: **576 tests, 0 failed, 1 ignored** (Linux, rustc 1.99.0), also
 green under 8-way CPU load. The two workflows themselves are in the tree and have
