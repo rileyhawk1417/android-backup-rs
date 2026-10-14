@@ -1005,27 +1005,28 @@ fn a_lost_device_pauses_the_job_with_a_reason() {
 // destination problems
 // ---------------------------------------------------------------------------
 
-/// A destination that cannot be prepared is refused before the job starts: no
-/// manifest row, no phone traffic, a typed error the UI can show.
+/// "Choose a folder on a fresh drive": a destination folder that does not
+/// exist yet is created, not refused — the drive is reachable, only the tree
+/// is new. (This test was once `a_missing_destination_is_refused_at_start`,
+/// pointing at `/definitely/not/a/mounted/drive` — refused on Linux only
+/// because `/` is not writable there; on Windows the runner owns `C:\`, so
+/// start did what it documents, created the folder and began. The refusal
+/// was an accident of Linux permissions, not a rule, and the rule — cannot be
+/// created at all — is the test below.)
 #[test]
-fn a_missing_destination_is_refused_at_start() {
+fn a_missing_destination_folder_is_created_not_refused() {
     let remote = MockRemote::new().with_file(&format!("{ROOT}/DCIM/a.jpg"), b"a");
     let harness = Harness::new(remote);
 
     let mut config = harness.config();
-    config.root = PathBuf::from("/definitely/not/a/mounted/drive/Phone");
-    let err = harness
-        .controller
-        .start(&harness.device, config)
-        .expect_err("start must fail");
-
-    assert!(matches!(err, StartError::Destination(_)), "{err:?}");
+    let root = harness.root.join("fresh/Phone");
+    config.root = root.clone();
+    let (outcome, _) = harness.run_with(config);
+    assert!(outcome.succeeded(), "{outcome:?}");
     assert!(
-        harness.remote.listings().is_empty(),
-        "the phone was never listed"
+        root.join("DCIM").is_dir(),
+        "the destination tree was created"
     );
-    assert!(harness.remote.pulls().is_empty());
-    assert!(harness.manifest().is_empty(), "nothing was recorded");
 }
 
 #[test]
@@ -1136,7 +1137,9 @@ fn control_errors_are_typed() {
 #[test]
 fn a_destination_that_cannot_be_created_is_reported_by_start() {
     let harness = Harness::new(MockRemote::new().with_file(&format!("{ROOT}/DCIM/a.jpg"), b"a"));
-    // A file where the destination directory belongs: creating the root fails.
+    // A file where the destination directory belongs: creating the root fails
+    // on every platform, because the blocker is a fact about the path, not
+    // about who is allowed to write to the filesystem root.
     let blocked = harness.root.join("blocked");
     std::fs::create_dir_all(&harness.root).expect("dest root");
     std::fs::write(&blocked, b"not a directory").expect("blocking file");
@@ -1148,5 +1151,10 @@ fn a_destination_that_cannot_be_created_is_reported_by_start() {
         .start(&harness.device, config)
         .expect_err("start must fail");
     assert!(matches!(err, StartError::Destination(_)), "{err:?}");
-    assert_eq!(harness.remote.pulls().len(), 0);
+    assert!(
+        harness.remote.listings().is_empty(),
+        "the phone was never listed"
+    );
+    assert!(harness.remote.pulls().is_empty());
+    assert!(harness.manifest().is_empty(), "nothing was recorded");
 }

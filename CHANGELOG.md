@@ -92,6 +92,16 @@ does nothing until a device is opted in. Everything here was planned and tracked
   fixture, where cmd wants `%%i` — "i was unexpected at this time", exit 255, and
   a test that never produced its output at all. It has a batch spelling now
   (`for /L %%i in (1,1,40000)`), same 2 MiB, same line count.
+- **The "missing destination is refused" e2e test asserted a Linux accident,
+  not a rule.** It pointed a backup at `/definitely/not/a/mounted/drive` — a
+  path refused on Linux only because `/` is not writable there. The product's
+  rule is the opposite on any reachable drive ("choose a folder on a fresh
+  drive": a missing folder is created), and on Windows the runner owns `C:\`,
+  so `start` did what it documents — created the folder and began — and the
+  test failed for it. The refusal is pinned portably now (a file where the
+  directory belongs: cannot be created on any platform, and nothing reaches
+  the phone or the manifest), and the creation rule has a test of its own
+  (`a_missing_destination_folder_is_created_not_refused`).
 - **The Linux tray icon is created on a thread of its own.** An AppIndicator cannot
   exist before GTK is initialised, and on the window's thread GTK is not — that
   thread belongs to winit — so gtk-rs asserted and the first 0.2.0 build died at

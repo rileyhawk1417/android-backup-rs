@@ -55,8 +55,13 @@ component — a real bug, not a portability slip, silently disabling the
 before-backup space check on every Windows machine (`backup::destination`). Its
 companion failure was a test fixture: an sh `for`/`seq` loop written verbatim
 into a `.bat`, where cmd wants `%%i` — two failures, two different lessons, one
-push. Local green on Linux proves neither, which is why the suite runs on both
-operating systems from the first commit.
+push. A fourth failure later was a test asserting an accident: the "missing
+destination is refused" e2e pointed at `/definitely/not/a/mounted/drive`, which
+is un-creatable only because Linux's `/` is not writable — on Windows the
+runner owns `C:\`, so the product's documented rule (create a missing folder on
+a reachable drive) fired and the test failed for being right about the wrong
+thing. Local green on Linux proves none of these, which is why the suite runs
+on both operating systems from the first commit.
 
 And it did not stop there — the free-space probe took **three** Windows rounds
 to get right, each red run caused by a different way of spelling the same path
