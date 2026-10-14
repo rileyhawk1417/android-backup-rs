@@ -12,16 +12,21 @@
 //!
 //! # How
 //!
-//! An advisory lock on a file beside the manifest. The lock is taken with
-//! `std::fs::File::try_lock` (stable since Rust 1.89), which is `flock` on Linux and
-//! `LockFileEx` on Windows — in both cases owned by the *kernel*, so a process that
-//! is killed with `SIGKILL`, crashes, or is closed while writing releases it. There
-//! is no stale lock to clean up and no pid to liveness-check, because there is
-//! nothing to be wrong about: if the lock is held, its holder is running.
+//! The lock is taken with `std::fs::File::try_lock` (stable since Rust 1.89), which is
+//! `flock` on Linux and `LockFileEx` on Windows — in both cases owned by the *kernel*,
+//! so a process that is killed with `SIGKILL`, crashes, or is closed while writing
+//! releases it. There is no stale lock to clean up and no pid to liveness-check,
+//! because there is nothing to be wrong about: if the lock is held, its holder is
+//! running.
 //!
-//! The file's *contents* are the holder's pid, and are used for one thing only: to
-//! tell the user which process already has the manifest. It is never trusted and
-//! never consulted to decide anything.
+//! The holder's pid is recorded for one thing only: to tell the user which process
+//! already has the manifest. It is never trusted and never consulted to decide
+//! anything. It lives in a separate, **unlocked** sidecar (`instance.pid`), not in
+//! the lock file — on Windows a byte-range lock is mandatory, and while the lock is
+//! held no other handle may read the locked file at all (Linux's advisory `flock`
+//! hides that, which is why the first cut of this module only worked on Linux). The
+//! sidecar is removed *before* the lock is released, so a pid never outlives its
+//! claim and a takeover always writes a fresh one.
 //!
 //! # What is deliberately absent
 //!
@@ -42,6 +47,14 @@ use android_backup_core::config::AppPaths;
 /// The name of the lock file, inside the data directory.
 pub const LOCK_FILE: &str = "instance.lock";
 
+/// The name of the unlocked sidecar that carries the holder's pid, beside the lock.
+///
+/// The pid cannot live inside the lock file: on Windows, byte-range locks are
+/// mandatory, so while the lock is held a second handle reading the file fails with
+/// a lock violation (os error 33) — Linux's advisory `flock` never tripped over
+/// this. Display text only; see the module header.
+pub const PID_FILE: &str = "instance.pid";
+
 /// A held lock, or the news that somebody else holds it.
 #[derive(Debug)]
 pub enum Claim {
@@ -59,6 +72,8 @@ pub struct InstanceLock {
     /// the handle *is* holding the lock.
     file: std::fs::File,
     path: PathBuf,
+    /// Removed on drop, before [`InstanceLock::file`] is unlocked.
+    pid_path: PathBuf,
 }
 
 impl InstanceLock {
@@ -69,7 +84,12 @@ impl InstanceLock {
         paths.data_dir.join(LOCK_FILE)
     }
 
-    /// Who last wrote its pid into the lock file. Only used to word a message.
+    /// Where the holder's pid sidecar lives.
+    pub fn pid_path(paths: &AppPaths) -> PathBuf {
+        paths.data_dir.join(PID_FILE)
+    }
+
+    /// Who last wrote its pid into the pid sidecar. Only used to word a message.
     pub fn holder(path: &Path) -> Option<u32> {
         std::fs::read_to_string(path)
             .ok()?
@@ -85,6 +105,13 @@ impl InstanceLock {
 
 impl Drop for InstanceLock {
     fn drop(&mut self) {
+        // The pid goes first, *before* the lock: a claimant that takes the lock over
+        // writes a fresh pid, and a removal after unlocking could race that write
+        // and erase it. While the lock is still held, no claimant can pass the lock
+        // to read or rewrite the pid, so this order is the race-free one. Failing
+        // here is not interesting: a leftover pid names a claim that is already
+        // gone, and the next holder rewrites it.
+        let _ = std::fs::remove_file(&self.pid_path);
         // Explicit, so that a launch immediately after a clean exit cannot race the
         // process teardown. Failing here is not interesting: the handle closing would
         // release it anyway.
@@ -102,11 +129,12 @@ impl Drop for InstanceLock {
 ///   start over a broken lock file would be worse than the risk it guards against.
 pub fn claim(paths: &AppPaths) -> Result<Claim, String> {
     let path = InstanceLock::path(paths);
+    let pid_path = InstanceLock::pid_path(paths);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("could not create {}: {err}", parent.display()))?;
     }
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
@@ -117,24 +145,36 @@ pub fn claim(paths: &AppPaths) -> Result<Claim, String> {
     match file.try_lock() {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => {
-            return Ok(Claim::Taken(InstanceLock::holder(&path)))
+            return Ok(Claim::Taken(InstanceLock::holder(&pid_path)))
         }
         Err(std::fs::TryLockError::Error(err)) => {
             return Err(format!("could not lock {}: {err}", path.display()));
         }
     }
 
-    // Ours: replace whatever the last process left behind. A failure here costs a
-    // readable pid and nothing else, so it is logged rather than propagated.
-    if let Err(err) = file
-        .set_len(0)
-        .and_then(|()| file.write_all(process::id().to_string().as_bytes()))
-        .and_then(|()| file.flush())
+    // Ours: record the pid where a second launch can read it — the unlocked
+    // sidecar, because this very file is now locked shut on Windows. A failure
+    // here costs a readable pid and nothing else, so it is logged rather than
+    // propagated.
+    if let Err(err) = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&pid_path)
+        .and_then(|mut pid_file| {
+            pid_file
+                .write_all(process::id().to_string().as_bytes())
+                .and_then(|()| pid_file.flush())
+        })
     {
-        tracing::warn!(%err, "could not write the lock file's owner");
+        tracing::warn!(%err, "could not write the lock holder's pid");
     }
 
-    Ok(Claim::Ours(InstanceLock { file, path }))
+    Ok(Claim::Ours(InstanceLock {
+        file,
+        path,
+        pid_path,
+    }))
 }
 
 /// What to tell somebody who started a second copy.
@@ -212,6 +252,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths(dir.path());
         assert_eq!(InstanceLock::path(&paths), dir.path().join(LOCK_FILE));
+        assert_eq!(InstanceLock::pid_path(&paths), dir.path().join(PID_FILE));
     }
 
     /// A lock file that cannot be opened must not stop the application: it is a

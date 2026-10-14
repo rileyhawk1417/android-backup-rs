@@ -70,6 +70,13 @@ extension, so the sanitizer's suffix after the extension (`CON.txt_`) never
 escaped the ban. Pure string logic, so the fix (move the `_` into the stem:
 `CON_.txt`) is provable on Linux, and the VM confirmed it for real.
 
+The same full run found a second Linux-only hiding place: the single-instance
+test, where the holder's pid was written into the locked file itself — on
+Windows a byte-range lock is mandatory, so a second handle cannot read the
+file at all (advisory `flock` on Linux says otherwise, and the test agreed
+with Linux). The pid moved to an unlocked sidecar, and the test now asserts
+the same story on both operating systems.
+
 And it did not stop there — the free-space probe took **three** Windows rounds
 to get right, each red run caused by a different way of spelling the same path
 (verbatim `\\?\` prefixes, 8.3 short names, mount points in another namespace).

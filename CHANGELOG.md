@@ -113,6 +113,15 @@ does nothing until a device is opted in. Everything here was planned and tracked
   mapping stays deterministic and idempotent. Caught by an actual run on a
   Windows machine, where the other four hostile names in the same test
   (colon, question mark, trailing dot, non-ASCII) already passed.
+- **The single-instance guard's pid message worked on Linux only.** The
+  holder's pid was written into the locked file itself, and on Windows a
+  byte-range lock is mandatory: while the lock is held, no other handle may
+  read the file, so a second launch's read failed with a lock violation and
+  the "already running" message lost its "(process N)". Linux's advisory
+  `flock` hides this, which is why only a Windows run exposed it. The pid
+  now lives in an unlocked sidecar (`instance.pid`) written after the lock
+  is taken and removed before the lock is released — display text only,
+  never trusted, exactly as before, now readable on both platforms.
 - **The Linux tray icon is created on a thread of its own.** An AppIndicator cannot
   exist before GTK is initialised, and on the window's thread GTK is not — that
   thread belongs to winit — so gtk-rs asserted and the first 0.2.0 build died at
