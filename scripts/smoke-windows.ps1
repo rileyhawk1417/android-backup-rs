@@ -1,25 +1,35 @@
-# Smoke-test the Windows build: does the .exe identify itself, and does it start
-# as a real application?
+# Smoke-test the Windows build: does the .exe identify itself, and does it
+# answer its command line?
 #
 #   pwsh -File scripts/smoke-windows.ps1
 #
 # The unit and integration suites run on every platform and prove the app's
 # logic. This proves the *artifact*: that the packaged .exe runs on a machine
-# with no build tools, using a throwaway APPDATA so the test cannot touch a real
-# installation.
+# that has no build tools and no configuration, and that its command line does
+# what cli.rs (tested, and re-proved here on the real binary) says it does.
 #
-# The "does it start" part is the one thing cargo cannot tell us. A missing
-# runtime DLL (a VC++ redistributable that this machine happens to have) means
-# CreateProcess fails outright, which the --version check catches; a startup bug
-# that only bites an empty configuration is caught by launching the app and
-# checking that it got far enough to write its data directory.
+# The three checks are the ones cargo cannot substitute for:
+# 1. It runs at all — this is the DLL check. A binary whose imports cannot be
+#    resolved (a missing VC++ redistributable this machine happens to have)
+#    never reaches its own first line of output; --version catches it.
+# 2. The version string ties the artifact to the tree it claims to be built
+#    from — what the tarball check depends on.
+# 3. A typo is an error, not a window that opens with the default
+#    configuration.
+#
+# Deliberately absent: launching the window. A build agent is exactly the
+# machine docs/troubleshooting.md §22 rules out — a runner's graphics stack has
+# no usable OpenGL, and the renderer refuses before the app creates its first
+# directory. A GUI launch check there could never pass, and the first release
+# cycle of this edit proved it by failing. The window is instead hosted where a
+# display exists: the Linux smoke job (smoke-linux.sh) puts a real window on
+# Xvfb — same binary sources, same winit/egui stack — and the Windows
+# data-directory + tray behavior is checked by a human on a GL-capable machine
+# (3D-accelerated VM counts; §22 has the two options).
 
 [CmdletBinding()]
 param(
-    [string] $Exe = '',
-
-    # How long to wait for the app to create its data directory.
-    [int] $TimeoutSeconds = 30
+    [string] $Exe = ''
 )
 
 Set-StrictMode -Version Latest
@@ -74,75 +84,5 @@ if ($LASTEXITCODE -eq 0) {
     throw 'an unknown argument exited 0'
 }
 Write-Host '== unknown argument: rejected'
-
-# 4. It starts as an application, in a throwaway profile. The app keeps its
-#    config, manifest and logs together in its data directory, which is under
-#    %APPDATA% on Windows and under $HOME on Linux — hence the candidates.
-$sandbox = Join-Path ([System.IO.Path]::GetTempPath()) ("android-backup-smoke-" + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
-
-$saved = @{}
-foreach ($variable in 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'HOME') {
-    $saved[$variable] = [Environment]::GetEnvironmentVariable($variable)
-}
-try {
-    [Environment]::SetEnvironmentVariable('APPDATA', $sandbox)
-    [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $sandbox)
-    [Environment]::SetEnvironmentVariable('USERPROFILE', $sandbox)
-    [Environment]::SetEnvironmentVariable('HOME', $sandbox)
-
-    Write-Host "== launching the app (sandbox: $sandbox)"
-    $process = Start-Process -FilePath $Exe -PassThru
-    $dataCandidates = @(
-        (Join-Path $sandbox 'android-backup'),
-        (Join-Path (Join-Path (Join-Path $sandbox '.local') 'share') 'android-backup'),
-        (Join-Path (Join-Path $sandbox '.config') 'android-backup')
-    )
-
-    $found = ''
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 250
-        $process.Refresh()
-        if ($process.HasExited) {
-            throw "the app exited with code $($process.ExitCode) before creating its data directory"
-        }
-        $found = $dataCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-        if (-not [string]::IsNullOrEmpty($found)) {
-            break
-        }
-    }
-
-    if ([string]::IsNullOrEmpty($found)) {
-        throw "the app did not create its data directory under $sandbox within $TimeoutSeconds seconds"
-    }
-    Write-Host "== data directory: $found"
-
-    # Informational: a window title confirms the window itself came up, but a
-    # build agent's session is allowed not to have a window station, so its
-    # absence is reported rather than fatal.
-    $process.Refresh()
-    $title = $process.MainWindowTitle
-    if ([string]::IsNullOrEmpty($title)) {
-        Write-Host '== window: not reported by this session (the process is alive and past startup)'
-    }
-    else {
-        if ($title -notlike '*Android Backup*') {
-            throw "unexpected window title '$title'"
-        }
-        Write-Host "== window: $title"
-    }
-
-    if (-not $process.HasExited) {
-        Stop-Process -Id $process.Id -Force
-        $process.WaitForExit()
-    }
-}
-finally {
-    foreach ($variable in $saved.Keys) {
-        [Environment]::SetEnvironmentVariable($variable, $saved[$variable])
-    }
-    Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
-}
 
 Write-Host 'smoke-windows.ps1: PASS'

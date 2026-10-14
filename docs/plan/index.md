@@ -240,12 +240,17 @@ Wave 8 — Release
 record is [`docs/acceptance.md`](../acceptance.md), and it names what is still
 unobserved.** E08.1: `scripts/package-windows.ps1` stages the `.exe`, README,
 licences and docs into `android-backup-<v>-windows-x86_64.zip`, and
-`smoke-windows.ps1` checks `--version`, the handling of an unknown argument, and
-that a first run creates its data directory inside an isolated `%APPDATA%`.
-Nothing has been built or run on Windows yet — the release workflow's
-`windows-latest` job is the first real run — so the script logic was exercised
-here under PowerShell 7 with a stand-in binary, and the Windows rows in
-`acceptance.md` stay PENDING until CI says otherwise. The signing decision
+`smoke-windows.ps1` checks `--version`, `--help`, and the handling of an unknown
+argument. Launching the window was deliberately **not** part of it from the
+0.2.0 cycle on: the release workflow's `windows-latest` job is a build agent with
+no usable OpenGL — exactly the machine
+[`troubleshooting.md`](troubleshooting.md) §22 rules out — and the renderer
+refuses before the app creates anything, so a launch check there could only ever
+fail. The window is hosted instead by the Linux smoke on `Xvfb`, and by a human on
+a GL-capable Windows machine. Until the tag build lands, nothing has been built
+or run on Windows: the script logic was exercised here under PowerShell 7 with a
+stand-in binary, and the Windows rows in `acceptance.md` stay PENDING until CI
+says otherwise. The signing decision
 (E08.1 item 3, whose deliverable is the decision itself) is recorded in [`docs/release.md`](../release.md)
 §3: unsigned for the MVP, with what signing would buy, why it is not in yet, and
 the follow-up. E08.2: `package-linux.sh` builds the tarball (binary, `install.sh`,

@@ -77,6 +77,17 @@ file at all (advisory `flock` on Linux says otherwise, and the test agreed
 with Linux). The pid moved to an unlocked sidecar, and the test now asserts
 the same story on both operating systems.
 
+The tag build then went red in a way no test could catch, because the failing
+step was a *check*: the Windows release job's smoke launched the GUI and waited
+for its data directory — on a runner whose graphics stack has no usable OpenGL,
+exactly the machine troubleshooting §22 rules out. The build finished; the
+check failed at the renderer's refusal, before the app created anything. The
+smoke now keeps what cargo cannot substitute for (`--version` catches
+unresolvable imports; `--help`; the unknown-argument rejection) and leaves the
+window to where a display is hosted: the Linux smoke puts a real one on Xvfb.
+The lesson is §22 turned into CI: a check that needs a real desktop runs where
+a real desktop is hosted, not everywhere.
+
 And it did not stop there — the free-space probe took **three** Windows rounds
 to get right, each red run caused by a different way of spelling the same path
 (verbatim `\\?\` prefixes, 8.3 short names, mount points in another namespace).
@@ -285,7 +296,7 @@ What the artifact-level checks add to the suites above:
 | Linux tray | `scripts/smoke-tray.sh <binary-or-AppImage>`, also reached from `smoke-linux.sh` when the host can support it | The icon really exists and really works, on a session bus of its own where `tray-probe.py` plays the panel: the app takes `--hidden` (no window on screen), the menu the app publishes is readable over `com.canonical.dbusmenu`, and its items act on the app — Open shows the window, Pause comes back as Resume *and* lands in `config.toml`, Quit ends the process with status 0 |
 | Linux AppImage | `scripts/build-appimage.sh` then `scripts/smoke-linux.sh dist/*.AppImage` | The extracted payload of the wrapper runs the same way. Secondary artifact: mounting it needs FUSE, which the smoke test avoids on purpose |
 | Runtime requirements | `scripts/check-glibc.sh <binary>`; `dist/*.deps.txt` | The glibc floor and the `ldd` list of the exact binary that was packaged |
-| Windows artifact | `scripts/package-windows.ps1`, `scripts/smoke-windows.ps1` | Portable ZIP; the `.exe` reports its version, refuses a bogus argument, and creates its data directory in an isolated `%APPDATA%`. **Not yet run on Windows** — the release workflow does that |
+| Windows artifact | `scripts/package-windows.ps1`, `scripts/smoke-windows.ps1` | Portable ZIP; the `.exe` reports its version, answers `--help`, and refuses a bogus argument — the artifact checks cargo cannot substitute for. A launch check is deliberately absent: a build agent is a GL-less machine (§22 above), so the window is hosted by the Linux smoke on `Xvfb` instead |
 | Tag sanity | `scripts/verify-tag.sh v0.2.0` | A tag that disagrees with `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md` or the required docs cannot be built |
 
 Why the tray has its own script, and why CI runs it: a tray icon is not a drawing

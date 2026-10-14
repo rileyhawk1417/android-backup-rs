@@ -69,9 +69,13 @@ build or smoke test does not fail the release; the AppImage is dropped from it.
    that the tray test cannot quietly skip) — then build and smoke-test the
    AppImage (non-blocking), then record the runtime requirements.
 3. **windows** — on `windows-latest`: the same test suite, a release build, and
-   `scripts/smoke-windows.ps1`, which checks the version, the handling of an
-   unknown argument, and that a first run creates its data directory inside an
-   isolated `%APPDATA%`. Then it packages the ZIP.
+   `scripts/smoke-windows.ps1`, which checks the version, `--help`, and the
+   handling of an unknown argument — the artifact checks cargo cannot substitute
+   for. Launching the window is deliberately **not** part of it: a build agent is
+   exactly the GL-less machine [`docs/troubleshooting.md`](troubleshooting.md) §22
+   rules out, and the renderer refuses before the app creates anything. The window
+   is hosted where a display exists: the Linux smoke job on `Xvfb`. Then it packages
+   the ZIP.
 4. **publish** — re-verifies every checksum it is about to publish, composes the
    notes from `CHANGELOG.md` plus the artifact list, and creates the release as a
    **draft**.
