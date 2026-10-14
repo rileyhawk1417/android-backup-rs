@@ -63,6 +63,13 @@ a reachable drive) fired and the test failed for being right about the wrong
 thing. Local green on Linux proves none of these, which is why the suite runs
 on both operating systems from the first commit.
 
+A real Windows machine catches the one case CI had not reached yet: a phone
+file named `CON.txt` failed on the VM with os error 87, while the same test
+passed on Linux — Windows reserves a device stem together with *any*
+extension, so the sanitizer's suffix after the extension (`CON.txt_`) never
+escaped the ban. Pure string logic, so the fix (move the `_` into the stem:
+`CON_.txt`) is provable on Linux, and the VM confirmed it for real.
+
 And it did not stop there — the free-space probe took **three** Windows rounds
 to get right, each red run caused by a different way of spelling the same path
 (verbatim `\\?\` prefixes, 8.3 short names, mount points in another namespace).

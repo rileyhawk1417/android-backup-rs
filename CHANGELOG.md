@@ -102,6 +102,17 @@ does nothing until a device is opted in. Everything here was planned and tracked
   directory belongs: cannot be created on any platform, and nothing reaches
   the phone or the manifest), and the creation rule has a test of its own
   (`a_missing_destination_folder_is_created_not_refused`).
+- **A phone file named `CON.txt` (or any reserved device name with an
+  extension) could not be backed up to Windows.** Windows reserves a device
+  stem together with *any* extension — `CON.txt`, `NUL.txt`, `COM1.jpg` are
+  all banned, and creating one fails with "The parameter is incorrect"
+  (os error 87). The sanitizer appended its `_` after the extension
+  (`CON.txt_`), which leaves the stem — and the name, and its `.part`
+  staging file — still banned. The `_` now goes into the stem
+  (`CON.txt` → `CON_.txt`), a legal name on every filesystem, so the
+  mapping stays deterministic and idempotent. Caught by an actual run on a
+  Windows machine, where the other four hostile names in the same test
+  (colon, question mark, trailing dot, non-ASCII) already passed.
 - **The Linux tray icon is created on a thread of its own.** An AppIndicator cannot
   exist before GTK is initialised, and on the window's thread GTK is not — that
   thread belongs to winit — so gtk-rs asserted and the first 0.2.0 build died at

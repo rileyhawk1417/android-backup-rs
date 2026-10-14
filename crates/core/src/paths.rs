@@ -11,7 +11,11 @@
 //!   It also neutralizes Windows drive prefixes: a phone file named `a:b.jpg`
 //!   becomes `a_b.jpg` instead of being mistaken for (or rejected as) a path on
 //!   drive `a`.
-//! * Windows-reserved device names (`CON`, `NUL`, `COM1`, …) get a `_` suffix.
+//! * Windows-reserved device names (`CON`, `NUL`, `COM1`, …) keep the ban from
+//!   reaching their extension: the `_` goes into the stem (`CON.txt` becomes
+//!   `CON_.txt`), because Windows reserves the stem before the first dot with
+//!   *any* extension, and an appended suffix outside it (`CON.txt_`) never
+//!   escapes the reserve.
 //! * Trailing dots/spaces (legal on Android, stripped by Windows) become `_`.
 
 use std::fmt;
@@ -168,17 +172,21 @@ pub fn sanitize_component(seg: &str) -> String {
     if out.is_empty() {
         out.push('_');
     }
-    if is_reserved(&out) {
+    if let Some((stem, rest)) = out.split_once('.') {
+        if stem_is_reserved(stem) {
+            out = format!("{stem}_.{rest}");
+        }
+    } else if stem_is_reserved(&out) {
         out.push('_');
     }
     out
 }
 
-fn is_reserved(name: &str) -> bool {
-    let stem = match name.split_once('.') {
-        Some((stem, _)) => stem,
-        None => name,
-    };
+/// Windows reserves device names together with *any* extension: `CON`, `CON.txt`
+/// and even `CON.txt.part` are all forbidden — the stem before the first dot is
+/// what counts. Creating one can fail outright (`ERROR_INVALID_PARAMETER`, os
+/// error 87) on a Windows destination, or worse, silently refer to the device.
+fn stem_is_reserved(stem: &str) -> bool {
     WINDOWS_RESERVED
         .iter()
         .any(|r| stem.eq_ignore_ascii_case(r))
@@ -319,8 +327,15 @@ mod tests {
     #[test]
     fn sanitizes_reserved_names() {
         assert_eq!(ok("CON").as_str(), "CON_");
-        assert_eq!(ok("con.txt").as_str(), "con.txt_");
-        assert_eq!(ok("NUL.log").as_str(), "NUL.log_");
+        // A reserved stem is reserved with *any* extension, so the `_` goes
+        // into the stem itself — appending after the extension would leave a
+        // name Windows still refuses (os error 87), as a Windows VM run of the
+        // e2e hostile-name test caught.
+        assert_eq!(ok("con.txt").as_str(), "con_.txt");
+        assert_eq!(ok("NUL.log").as_str(), "NUL_.log");
+        assert_eq!(ok("COM1.txt").as_str(), "COM1_.txt");
+        // Bare device names keep the plain suffix, and a stem that merely
+        // starts like a device is untouched.
         assert_eq!(ok("COM1").as_str(), "COM1_");
         assert_eq!(ok("CONSOLE").as_str(), "CONSOLE");
     }
@@ -334,7 +349,14 @@ mod tests {
 
     #[test]
     fn sanitize_is_idempotent() {
-        for name in ["a_b.jpg", "CON_", "weird_", "plain.jpg", "CONSOLE"] {
+        for name in [
+            "a_b.jpg",
+            "CON_",
+            "CON_.txt",
+            "weird_",
+            "plain.jpg",
+            "CONSOLE",
+        ] {
             let once = sanitize_component(name);
             assert_eq!(sanitize_component(&once), once, "{name}");
         }
