@@ -159,6 +159,10 @@ does nothing until a device is opted in. Everything here was planned and tracked
 - **Schedules are intervals, not calendars.** "Every day at 03:00" is deliberately
   not in the model (timezone and missed-run semantics a phone backup does not need);
   "every 6 hours" counts from the last attempt.
+- **The window needs a working OpenGL.** The UI's renderer (egui/glow) refuses to
+  start where the graphics driver reports a very old OpenGL — a virtual machine
+  without GPU acceleration is the usual case. The backup itself needs no GPU
+  (`docs/troubleshooting.md` §22 covers the two ways to run in a VM).
 
 ## [0.1.0]
 

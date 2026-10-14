@@ -454,10 +454,40 @@ before it opens anything. The first one is running — usually hidden, and usual
 because of **Start in the tray when I log in**, which is the point of that setting. Find
 its icon ([§18](#18-there-is-no-tray-icon) if it is not there), or end the process in the
 task manager and start again.
-
 `instance.lock`, next to the manifest
 ([setup §8](setup.md#8-where-everything-is-stored)), is the file that enforces this. It
-holds the owning process id and is locked by the operating system, which releases the
-lock when the process ends — even if the process was killed, so a leftover file is
-harmless and can be ignored. Deleting it while the program runs does not unlock
-anything either: the lock lives on the open file handle, not on the name.
+is locked by the operating system, which releases the lock when the process ends — even
+if the process was killed, so a leftover file is harmless and can be ignored. Deleting
+it while the program runs does not unlock anything either: the lock lives on the open
+file handle, not on the name. The owning process's id, when it can be read, is beside
+it in `instance.pid` — display text for the message above, never consulted for
+decisions, and removed when its claim ends. (The lock file itself is unreadable while
+the lock is held on Windows — the operating system enforces the lock for reads too,
+not just writes.) Both files are safe to delete while the program is not running.
+
+## 22. The window does not open in a virtual machine
+
+```
+egui_glow: OpenGL ... requires OpenGL 2.0+
+```
+
+The interface draws with egui's glow renderer, which asks the graphics driver for a
+real OpenGL context. A virtual machine's default display driver can answer with something
+much older than that (VirtualBox without 3D acceleration reports OpenGL 1.1), and the
+renderer refuses rather than draw nothing. The backup itself never touches the GPU —
+ADB, the manifest and every file path are ordinary program logic — the window is the
+only part that cares.
+
+Two ways out, in order:
+
+1. **Give the machine a GPU.** VirtualBox: Settings → Display → *Enable 3D
+   Acceleration* (and install the Guest Additions so the accelerated driver loads).
+   VMware Workstation: *Accelerate 3D graphics*. Then run again.
+2. **No GPU available: let the CPU draw.** Mesa's Windows software driver
+   (`mesa-dist-win`, the llvmpipe build) ships a drop-in `opengl32.dll` — put the
+   64-bit one in the same folder as `android-backup.exe`. It implements a modern
+   OpenGL on the CPU, it is a standard, widely used shim that touches nothing else,
+   and it is more than fast enough for this UI — it only redraws when you interact.
+
+If the window still refuses after both, the failure text names the OpenGL version the
+driver reported — include it in a bug report.
