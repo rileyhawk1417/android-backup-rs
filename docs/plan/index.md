@@ -246,11 +246,13 @@ argument. Launching the window was deliberately **not** part of it from the
 no usable OpenGL — exactly the machine
 [`troubleshooting.md`](troubleshooting.md) §22 rules out — and the renderer
 refuses before the app creates anything, so a launch check there could only ever
-fail. The window is hosted instead by the Linux smoke on `Xvfb`, and by a human on
-a GL-capable Windows machine. Until the tag build lands, nothing has been built
-or run on Windows: the script logic was exercised here under PowerShell 7 with a
-stand-in binary, and the Windows rows in `acceptance.md` stay PENDING until CI
-says otherwise. The signing decision
+fail. The same cycle then removed artifact smoke from the release pipeline
+entirely (three red rounds; the full story is in `docs/testing.md`): the window
+is hosted by `ci.yml`'s Linux smoke job on `Xvfb`, the release jobs run the test
+suite inside the environments that build the artifacts, and a human runs the
+artifact checks via the packaging script. Nothing was built or run on Windows on
+this desk — the script logic was exercised here under PowerShell 7 with a
+stand-in binary, and the Windows rows in `acceptance.md` stay PENDING (human). The signing decision
 (E08.1 item 3, whose deliverable is the decision itself) is recorded in [`docs/release.md`](../release.md)
 §3: unsigned for the MVP, with what signing would buy, why it is not in yet, and
 the follow-up. E08.2: `package-linux.sh` builds the tarball (binary, `install.sh`,
@@ -271,9 +273,14 @@ procedure per row. No failures, so the "Post-acceptance fixes" tracker is empty.
 Decisions taken while building this wave:
 - **The AppImage is secondary, and CI treats it that way.** The tarball is the
   artifact we stand behind; the AppImage wraps the same binary but depends on
-  FUSE and on AppImageLauncher behaving. A failed AppImage build or smoke test is
-  therefore dropped from the release (`continue-on-error` plus a delete step)
-  rather than blocking it — and never shipped as a known-broken download.
+  FUSE and on AppImageLauncher behaving. From the first cycles on, a failed
+  AppImage build is skipped from the release (`continue-on-error`) rather than
+  blocking it; an artifact smoke in the release pipeline earned its removal the
+  hard way over three release cycles (see `docs/testing.md`): a smoke needs a
+  display, a session bus and OpenGL on the artifact's host, and the release
+  environments have none — the window-and-tray guarantee lives in `ci.yml`'s
+  smoke job, and the artifact's first start is verified by hand once per
+  release.
 - **The release is created as a draft.** Notes and checksums get one human read
   before they are visible; publishing is one click, correcting a published
   release is not.

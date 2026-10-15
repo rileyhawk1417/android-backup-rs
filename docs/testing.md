@@ -86,7 +86,20 @@ smoke now keeps what cargo cannot substitute for (`--version` catches
 unresolvable imports; `--help`; the unknown-argument rejection) and leaves the
 window to where a display is hosted: the Linux smoke puts a real one on Xvfb.
 The lesson is §22 turned into CI: a check that needs a real desktop runs where
-a real desktop is hosted, not everywhere.
+a real desktop is hosted, not everywhere. It still was not enough, and the
+next red rounds taught the sharper version: even the trimmed artifact checks
+cannot truthfully run in the release environment. On Windows the runner's pwsh
+closes the child's stdout pipe mid-answer (os error 232), so `$LASTEXITCODE`
+never gets set and the check on it dies under StrictMode; on Linux the slim
+release container has no `dbus-launch` for GTK to fall back on, and the app
+exited before its window instead of showing one. Both failures were the
+environment, not the binary. The smoke steps came out of `release.yml`
+entirely, and the guarantee moved to where hosts exist: `ci.yml`'s smoke job
+still puts a real window and tray on Xvfb on every push, the release jobs run
+the same suite inside the container that built the artifacts, and
+`package-windows.ps1` runs the artifact checks for a human. Three release
+cycles to learn one sentence: a smoke of an artifact belongs where the
+artifact's host is hosted.
 
 And it did not stop there — the free-space probe took **three** Windows rounds
 to get right, each red run caused by a different way of spelling the same path

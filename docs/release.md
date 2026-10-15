@@ -52,7 +52,8 @@ user runs is the one they can see and audit.
 On Linux the **tarball is the artifact we stand behind**. The AppImage is
 best-effort and secondary: it is the same binary, and whether it starts depends
 on the host (FUSE, and AppImageLauncher if it is installed). A failed AppImage
-build or smoke test does not fail the release; the AppImage is dropped from it.
+build does not fail the release; CI publishes whatever built, and a human
+verifies the AppImage launches once per release, on a real desktop.
 
 ## 2. What the pipeline does
 
@@ -61,21 +62,28 @@ build or smoke test does not fail the release; the AppImage is dropped from it.
 1. **verify** — `scripts/verify-tag.sh`: tag format, version agreement across
    `Cargo.toml`/`Cargo.lock`/`CHANGELOG.md`, changelog entry present, required
    docs and scripts present and executable.
-2. **linux** — in a `debian:12-slim` container: install the toolchain, run
-   `cargo test --workspace --locked`, package the tarball, smoke-test the
-   tarball's binary on a private `Xvfb` display and a private session bus — window
-   first, then the tray icon and its menu (`scripts/smoke-linux.sh` and
-   `scripts/smoke-tray.sh`; the container installs `libayatana-appindicator3` so
-   that the tray test cannot quietly skip) — then build and smoke-test the
-   AppImage (non-blocking), then record the runtime requirements.
+2. **linux** — in a `debian:12-slim` container: install the build toolchain, run
+   `cargo test --workspace --locked`, package the tarball and the AppImage
+   (non-blocking), record the runtime requirements. It does **not** smoke-test
+   the artifacts, deliberately: a smoke needs a display, a session bus and
+   OpenGL on the artifact's host, and this container offers none of those.
+   Every release cycle that put a smoke here failed on the environment instead
+   of on the artifact (a missing `dbus-launch`, an appindicator-less fallback);
+   the window-plus-tray guarantee lives in ci.yml's smoke job, which runs on a
+   full ubuntu runner with `Xvfb` on every push, and the artifact's startup is
+   verified by hand once per release (§1's commands). The release job's
+   guarantee is the same suite ci.yml runs, executed inside the container the
+   tarball is built in.
 3. **windows** — on `windows-latest`: the same test suite, a release build, and
-   `scripts/smoke-windows.ps1`, which checks the version, `--help`, and the
-   handling of an unknown argument — the artifact checks cargo cannot substitute
-   for. Launching the window is deliberately **not** part of it: a build agent is
-   exactly the GL-less machine [`docs/troubleshooting.md`](troubleshooting.md) §22
-   rules out, and the renderer refuses before the app creates anything. The window
-   is hosted where a display exists: the Linux smoke job on `Xvfb`. Then it packages
-   the ZIP.
+   then the ZIP is packaged with `-SkipSmoke`. The artifact checks
+   (`scripts/smoke-windows.ps1`: `--version` catches unresolvable imports,
+   `--help`, unknown-argument rejection) run for a human via the packaging
+   script without the switch; they cannot truthfully run here — the runner's
+   powershell closes the child's stdout pipe mid-answer (os error 232, so
+   `$LASTEXITCODE` is never set and a check on it dies under StrictMode), and
+   the window would be refused for the §22 reason anyway: no usable OpenGL.
+   CI's guarantee is the test suite plus ci.yml's Linux smoke job, which hosts
+   the same sources' window on `Xvfb`.
 4. **publish** — re-verifies every checksum it is about to publish, composes the
    notes from `CHANGELOG.md` plus the artifact list, and creates the release as a
    **draft**.
